@@ -1,6 +1,6 @@
 # DynamicTDMA
 
-基于 OMNeT++ 的动态 TDMA MAC 协议仿真系统，支持**空间复用**与**强化学习接口**。
+基于 OMNeT++ 的动态 TDMA MAC 协议仿真系统，支持**空间复用**与**在线强化学习调度**。
 
 ## 特性
 
@@ -8,24 +8,27 @@
 - **空间复用**：利用两跳邻居信息，允许互不干扰的节点复用同一时隙，提升频谱利用率
 - **多优先级 QoS**：低 / 高 / 关键三级业务优先级队列
 - **多种流量模型**：泊松分布、阶梯式递增、自适应流量生成
-- **RL 环境接口**：仿真通过命名管道实时推送节点特征，供强化学习 Agent 在线使用
+- **在线 RL 接口**：仿真通过命名管道实时推送节点特征与奖励信号，LSTM Actor-Critic Agent 在线决策
 - **公平性分析**：自动输出公平性指数、逐帧性能指标等统计数据
 
 ## 依赖
 
 | 组件 | 版本 |
 |:---|:---|
-| [OMNeT++](https://omnetpp.org/) | 6.0+ |
+| [OMNeT++](https://omnetpp.org/) | 6.3+ |
 | C++ 编译器 | C++17 |
-| Python | 3.8+（RL 接口 / Transformer 模型） |
+| Python | 3.8+（torch、numpy） |
 
 ## 快速开始
 
 ```bash
-# 编译
+# 激活 OMNeT++ 环境（含 Python venv）
+source /home/opp_env/omnetpp-6.3.0/setenv
+
+# 编译仿真
 make
 
-# GUI 模式运行
+# GUI 模式
 ./DynamicTDMA -f omnetpp.ini
 
 # 命令行批量仿真
@@ -40,47 +43,87 @@ opp_makemake -f --deep -O out -I.
 
 ## 项目结构
 
+### 仿真核心（C++）
+
 | 文件 | 说明 |
 |:---|:---|
-| `DynamicTDMA.cc/h` | 核心 MAC 协议：状态机、报文处理、空间复用决策、统计输出、RL 管道推送 |
+| `DynamicTDMA.cc/h` | MAC 协议核心：状态机、报文处理、空间复用决策、统计输出、RL 管道推送 |
 | `SlotSelection.cc/h` | 时隙选择：随机化排序 + 失败退避策略 |
 | `TDMA_Messages.msg` | 报文格式定义（RTS / CTS / DATA） |
 | `Network.ned` | 网络拓扑（部分网格连接） |
 | `DynamicTDMA.ned` | 节点模块参数与门定义 |
 | `omnetpp.ini` | 仿真参数配置 |
-| `rl_receiver.py` | RL 环境接口：接收仿真特征，提供帧迭代器供 Agent 调用 |
-| `transformer_model.py` | PyTorch Transformer 回归模型（离线训练用） |
 
-## RL 接口
+### 强化学习（Python）
 
-仿真运行时通过 POSIX 命名管道（`/tmp/tdma_rl_state`）实时推送每帧每节点的特征 JSON。
-Python 端通过 `connect()` 上下文管理器接收并按帧聚合。
+| 文件 | 说明 |
+|:---|:---|
+| `rl_receiver.py` | 管道接收端：`connect()` 上下文管理器，按帧聚合节点观测 |
+| `rl_agent.py` | LSTM Actor-Critic 网络：`RLFeatureExtractor`、`LSTMActorCritic`、`TDMAAgent` |
+| `ppo_trainer.py` | PPO 在线训练循环：轨迹收集、advantage 计算、策略更新、权重保存 |
+| `transformer_model.py` | Transformer 回归模型（离线流量预测，特征解析函数供 RL 复用） |
 
-**特征分三组：**
+## RL 管道协议
 
-| 组别 | 字段 | 说明 |
-|:---|:---|:---|
-| `slot_sensing` | `Bown`, `T2hop`, `Cctrl`, `Hcoll` | 时隙占用与信道感知 |
-| `queue_traffic` | `Qt`, `lambda_ewma`, `Wt`, `mu_nbr` | 本地队列与业务压力 |
-| `fairness` | `Sharet`, `Share_avgnbr`, `Jlocal`, `Envy` | 公平性与机会份额 |
+仿真每帧结束时，通过 POSIX 命名管道 `/tmp/tdma_rl_state` 推送 JSON（每节点一行）：
 
-**使用示例：**
-
-```python
-from rl_receiver import connect
-
-# 先启动本脚本，再启动 OMNeT++ 仿真
-with connect(num_nodes=5) as frames:
-    for frame_obs in frames:
-        state  = frame_obs.to_state_dict()   # {node_id: [float, ...]}
-        reward = compute_reward(frame_obs)
-        action = agent.step(state, reward)
+```json
+{
+  "frame": 5, "nodeId": 2, "simTime": 0.1,
+  "slot_sensing":  {"Bown": "0010...", "T2hop": "...", "Cctrl": 1, "Hcoll": 3},
+  "queue_traffic": {"Qt": 4, "lambda_ewma": 2.1, "Wt": 0.02, "mu_nbr": 0.8},
+  "fairness":      {"Sharet": 0.3, "Share_avgnbr": 0.4, "Jlocal": 0.91, "Envy": 0.1},
+  "reward_signal": {"Nsucc": 2, "Ncoll": 1, "Pt1": [0.0, 0.7, 0.3, ...]}
+}
 ```
 
-独立调试（验证特征接收是否正常）：
+**状态向量维度**（M 个数据时隙）：`Bown(M) + T2hop(2M) + 数值特征(10) + Pt1(M) = 4M+10`
+
+## 训练流程
 
 ```bash
-python rl_receiver.py
+source /home/opp_env/omnetpp-6.3.0/setenv
+
+# 1. 先启动训练脚本（等待仿真连接）
+python ppo_trainer.py --num_slots 10 --num_nodes 5
+
+# 2. 另一个终端启动仿真
+./DynamicTDMA -f omnetpp.ini -u Cmdenv
+```
+
+训练日志示例：
+```
+[PPO] frame=   32  update=   1  avg_r=+0.412  L_actor=-0.0023  L_critic=0.8821  entropy=0.6823
+```
+
+权重自动保存至 `checkpoints/tdma_ppo_latest.pt`，每 500 帧一个检查点。
+
+## 网络架构
+
+```
+观测序列 Ot = [o_{t-9}, ..., o_t]   shape: (T=10, 4M+10)
+         │
+         ▼
+  ┌─────────────┐
+  │  LSTM-1     │  共享时序编码器（hidden=128）
+  └──────┬──────┘
+         │ F't
+   ┌─────┴─────┐
+   ▼           ▼
+┌───────┐   ┌───────┐
+│LSTM-2 │   │  FC   │   Critic → V(t)（标量）
+│hidden │   │128→1  │
+│  =64  │
+│FC+Sig │
+└───────┘
+ P_t ∈ (0,1)^M         Actor → 每时隙申请概率
+```
+
+## 奖励函数
+
+```
+r_t = α·Nsucc - β·Ncoll + γ·Jlocal - δ·Wt
+    = 1.0×成功时隙数 - 0.5×冲突时隙数 + 0.3×Jain公平指数 - 0.2×队头等待时延
 ```
 
 ## 仿真输出
@@ -102,9 +145,12 @@ python rl_receiver.py
 │  广播申请   │    │ 回复+监听   │    │  数据传输   │
 │  携带优先级 │    │ 构建占用表  │    │  空间复用   │
 └─────────────┘    └─────────────┘    └─────────────┘
+                                              │
+                                     推送特征到管道
+                                              │
+                                       Python RL Agent
+                                       下一帧更新 P_t
 ```
-
-每帧结束时，各节点将本帧特征写入命名管道，供 Python RL Agent 在下一帧决策前读取。
 
 ## 许可证
 
