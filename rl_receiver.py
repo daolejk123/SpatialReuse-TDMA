@@ -50,6 +50,8 @@ class NodeObservation:
         "Qt", "lambda_ewma", "Wt", "mu_nbr",
         # 公平性与机会份额
         "Sharet", "Share_avgnbr", "Jlocal", "Envy",
+        # 奖励信号
+        "Nsucc", "Ncoll", "Pt1",
     )
 
     def __init__(self, raw: dict):
@@ -74,6 +76,11 @@ class NodeObservation:
         self.Share_avgnbr = f["Share_avgnbr"]  # 一跳邻居平均时隙份额
         self.Jlocal       = f["Jlocal"]        # 局部 Jain 公平指数
         self.Envy         = f["Envy"]          # 机会差异 = Share_avgnbr - Sharet
+
+        rs = raw.get("reward_signal", {})
+        self.Nsucc = rs.get("Nsucc", 0)        # 本帧成功传输时隙数
+        self.Ncoll = rs.get("Ncoll", 0)        # 本帧冲突时隙数
+        self.Pt1   = rs.get("Pt1", [])         # 上一帧申请概率向量 (M维)
 
     def to_vector(self) -> List[float]:
         """将数值特征展平为 RL 状态向量（Bown 逐位展开，其余数值依次追加）。"""
@@ -299,6 +306,8 @@ def _print_frame(frame_obs: FrameObservation):
               f"Wt={obs.Wt:.4f}  mu_nbr={obs.mu_nbr:.3f}")
         print(f"    [公平性]    Sharet={obs.Sharet:.3f}  "
               f"Jlocal={obs.Jlocal:.3f}  Envy={obs.Envy:.3f}")
+        print(f"    [奖励信号]  Nsucc={obs.Nsucc}  Ncoll={obs.Ncoll}  "
+              f"Pt1_len={len(obs.Pt1)}")
         print(f"    [状态向量维度] {len(obs.to_vector())}")
 
 

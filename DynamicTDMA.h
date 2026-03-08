@@ -115,9 +115,12 @@ protected:
   std::vector<double> myPriorities;
 
   // --- 选槽退避：若上一次申请某个 slot 失败，则下一次调度优先避开该 slot ---
-  // 语义：avoidSlotsNextSchedule[slot]=true 表示“下一次 scheduleRequests() 尽量别用这个 slot”
+  // 语义：avoidSlotsNextSchedule[slot]=true 表示”下一次 scheduleRequests() 尽量别用这个 slot”
   // 这是一次性退避：scheduleRequests() 运行后会清空该表
   std::vector<bool> avoidSlotsNextSchedule;
+
+  // --- RL Pt-1：上一帧的申请概率向量，写入管道供 Python 端构造状态向量 ---
+  std::vector<double> prevPriorities;
 
   // 5. 复杂请求模块 (Complex Request Module)
   std::deque<PendingPacket> packetQueue;
@@ -232,6 +235,10 @@ protected:
     double shareAvgNbr;
     double jlocal;
     double envy;
+    // 奖励信号（供 RL 计算 reward）
+    int nsucc;                    // 本帧成功传输时隙数
+    int ncoll;                    // 本帧申请但遭遇冲突的时隙数
+    std::vector<double> pt1;      // 上一帧申请概率向量 (Pt-1)
   };
   void initRlPipe();
   void writeRlFeatures(const RlFrameFeatures &f);

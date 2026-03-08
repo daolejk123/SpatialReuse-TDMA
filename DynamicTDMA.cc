@@ -229,6 +229,7 @@ void DynamicTDMA::initialize() {
   mySlots.assign(numDataSlots, false);
   rtsApplicantsBySlot.assign(numDataSlots, std::vector<int>{});
   avoidSlotsNextSchedule.assign(numDataSlots, false);
+  prevPriorities.assign(numDataSlots, 0.0);
   frameSuccessfulSlots.assign(numDataSlots, false);
   nodeOccHistory.assign(numNodes, std::deque<int>{});
 
@@ -844,6 +845,16 @@ void DynamicTDMA::processSlotTimer() {
       for (int v : collHist)
         hcoll += v;
 
+      // 4.1) 本帧冲突时隙数 (Ncoll)：本节点申请且发生碰撞的时隙数
+      int frameNcoll = 0;
+      for (int s = 0; s < numDataSlots; s++) {
+        if (myPriorities[s] > 0.0 && (int)rtsApplicantsBySlot[s].size() > 1) {
+          for (int id : rtsApplicantsBySlot[s]) {
+            if (id == myId) { frameNcoll++; break; }
+          }
+        }
+      }
+
       // 5) Qt / Wt
       int Qt = (int)packetQueue.size();
       double Wt = 0.0;
@@ -1048,7 +1059,10 @@ void DynamicTDMA::processSlotTimer() {
     writeRlFeatures({frameCounter,
                      bownBitmap, t2hop.str(), ctrlCollisionCount, hcoll,
                      Qt, lambdaEwma, Wt, muNbr,
-                     Sharet, ShareAvgNbr, Jlocal, Envy});
+                     Sharet, ShareAvgNbr, Jlocal, Envy,
+                     (int)deltaTx, frameNcoll, prevPriorities});
+    // 保存本帧申请概率向量，供下一帧作为 Pt-1 特征
+    prevPriorities = myPriorities;
 
       enterRequestPhase(); // 下一帧循环
     }
@@ -1771,6 +1785,17 @@ void DynamicTDMA::writeRlFeatures(const RlFrameFeatures &f) {
         << "\"Share_avgnbr\":" << f.shareAvgNbr << ","
         << "\"Jlocal\":" << f.jlocal << ","
         << "\"Envy\":" << f.envy
+      << "},"
+      // 4) 奖励信号（RL reward 计算所需）
+      << "\"reward_signal\":{"
+        << "\"Nsucc\":" << f.nsucc << ","
+        << "\"Ncoll\":" << f.ncoll << ","
+        << "\"Pt1\":[";
+  for (int i = 0; i < (int)f.pt1.size(); i++) {
+    if (i > 0) oss << ",";
+    oss << f.pt1[i];
+  }
+  oss       << "]"
       << "}"
       << "}\n";
 
