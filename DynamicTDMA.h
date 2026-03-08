@@ -8,6 +8,10 @@
 #include <omnetpp.h>
 #include <string>
 #include <vector>
+// RL pipe (POSIX named pipe)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 using namespace omnetpp;
 
@@ -161,6 +165,12 @@ protected:
   std::string fairnessCsvPath;
   std::string featureJsonlPath;
 
+  // RL 命名管道：C++ → Python 实时特征推送
+  // 所有节点共享同一个 fd（OMNeT++ 单线程，无竞争）
+  static int sRlPipeFd;
+  static const char *kRlPipePath;        // "/tmp/tdma_rl_state"
+  static long long sRlReconnectCounter;  // 限速重连：每 N 帧重试一次
+
   // --- 每帧详细指标（滑动窗口）---
   int statsWindowK = 10;
   double ewmaAlpha = 0.2;
@@ -203,6 +213,28 @@ protected:
   void runDeepLearningModel(); // (Deprecated)
   void updateOccupancyTable();
   void broadcastPacket(cPacket *pkt);
+
+  // RL 管道辅助：初始化管道（仅执行一次）；写一帧特征 JSON
+  struct RlFrameFeatures {
+    long long frame;
+    // 时隙占用与信道感知
+    std::string bown;
+    std::string t2hop;
+    int cctrl;
+    int hcoll;
+    // 本地排队与业务压力
+    int Qt;
+    double lambdaEwma;
+    double Wt;
+    double muNbr;
+    // 公平性与机会份额
+    double sharet;
+    double shareAvgNbr;
+    double jlocal;
+    double envy;
+  };
+  void initRlPipe();
+  void writeRlFeatures(const RlFrameFeatures &f);
 
   // 可视化辅助：高亮/恢复链路颜色（仅 GUI 生效）
   int findOutGateIndexToNode(int destNodeId) const;

@@ -9,6 +9,11 @@
 
 Define_Module(DynamicTDMA);
 
+// RL 管道静态成员定义
+int DynamicTDMA::sRlPipeFd = -1;
+const char *DynamicTDMA::kRlPipePath = "/tmp/tdma_rl_state";
+long long DynamicTDMA::sRlReconnectCounter = 0;
+
 static std::string buildTimestampedStatsPath(const std::string &prefix,
                                              bool useResultsDir) {
   std::time_t now = std::time(nullptr);
@@ -245,8 +250,8 @@ void DynamicTDMA::initialize() {
   // 初始化 CTS 汇总缓存
   resetCtsAggregation();
 
-  // 初始化 CTS 汇总缓存
-  resetCtsAggregation();
+  // 初始化 RL 命名管道（所有节点共用，仅第一次执行）
+  initRlPipe();
 }
 
 void DynamicTDMA::handleMessage(cMessage *msg) {
@@ -1039,6 +1044,12 @@ void DynamicTDMA::processSlotTimer() {
 
     lastReqProbAvg = reqProbAvg;
 
+    // 推送本帧特征到 Python RL 接收端（命名管道）
+    writeRlFeatures({frameCounter,
+                     bownBitmap, t2hop.str(), ctrlCollisionCount, hcoll,
+                     Qt, lambdaEwma, Wt, muNbr,
+                     Sharet, ShareAvgNbr, Jlocal, Envy});
+
       enterRequestPhase(); // 下一帧循环
     }
   }
@@ -1691,5 +1702,101 @@ void DynamicTDMA::broadcastPacket(cPacket *pkt) {
     delete pkt;
   } else {
     delete pkt;
+  }
+}
+
+// ------------------------------------------------------------------
+// RL 命名管道：初始化 + 特征写入
+// ------------------------------------------------------------------
+
+void DynamicTDMA::initRlPipe() {
+  if (sRlPipeFd >= 0)
+    return; // 已经由其他节点初始化过
+
+  // 创建 FIFO（若已存在则忽略 EEXIST）
+  int ret = mkfifo(kRlPipePath, 0666);
+  if (ret < 0 && errno != EEXIST) {
+    EV << "WARNING: mkfifo(" << kRlPipePath << ") failed: " << strerror(errno)
+       << endl;
+    return;
+  }
+
+  // 以非阻塞方式打开写端；若 Python 尚未打开读端，open() 返回 -1(ENXIO)，
+  // 仿真照常运行，后续帧会重试
+  sRlPipeFd = open(kRlPipePath, O_WRONLY | O_NONBLOCK);
+  if (sRlPipeFd < 0) {
+    EV << "INFO: RL pipe not yet connected (Python receiver not running). "
+          "Will retry each frame."
+       << endl;
+  } else {
+    EV << "INFO: RL pipe connected -> " << kRlPipePath << endl;
+  }
+}
+
+void DynamicTDMA::writeRlFeatures(const RlFrameFeatures &f) {
+  // 若管道尚未打开，限速重连（每 10 帧尝试一次，避免高频 open() 系统调用）
+  if (sRlPipeFd < 0) {
+    if ((sRlReconnectCounter++ % 10) != 0)
+      return;
+    sRlPipeFd = open(kRlPipePath, O_WRONLY | O_NONBLOCK);
+    if (sRlPipeFd < 0)
+      return; // Python 仍未就绪，本帧跳过
+    EV << "INFO: RL pipe reconnected." << endl;
+  }
+
+  // 构造 JSON 消息（单行，换行符作为消息边界）
+  // 三类特征分组：slot_sensing / queue_traffic / fairness
+  std::ostringstream oss;
+  oss << "{"
+      << "\"frame\":" << f.frame << ","
+      << "\"nodeId\":" << myId << ","
+      << "\"simTime\":" << simTime().dbl() << ","
+      // 1) 时隙占用与信道感知特征
+      << "\"slot_sensing\":{"
+        << "\"Bown\":\"" << escapeJsonString(f.bown) << "\","
+        << "\"T2hop\":\"" << escapeJsonString(f.t2hop) << "\","
+        << "\"Cctrl\":" << f.cctrl << ","
+        << "\"Hcoll\":" << f.hcoll
+      << "},"
+      // 2) 本地排队与业务压力特征
+      << "\"queue_traffic\":{"
+        << "\"Qt\":" << f.Qt << ","
+        << "\"lambda_ewma\":" << f.lambdaEwma << ","
+        << "\"Wt\":" << f.Wt << ","
+        << "\"mu_nbr\":" << f.muNbr
+      << "},"
+      // 3) 公平性与机会份额特征
+      << "\"fairness\":{"
+        << "\"Sharet\":" << f.sharet << ","
+        << "\"Share_avgnbr\":" << f.shareAvgNbr << ","
+        << "\"Jlocal\":" << f.jlocal << ","
+        << "\"Envy\":" << f.envy
+      << "}"
+      << "}\n";
+
+  std::string msg = oss.str();
+
+  // write() 对 < PIPE_BUF(4096) 的消息是原子操作，不会与其他节点的写入交错
+  ssize_t written = write(sRlPipeFd, msg.c_str(), msg.size());
+  if (written > 0 && (size_t)written < msg.size()) {
+    // 消息超过 PIPE_BUF 导致部分写：Python 会收到截断的 JSON，重置连接
+    EV << "WARNING: RL pipe partial write (" << written << "/" << msg.size()
+       << "). Closing pipe." << endl;
+    close(sRlPipeFd);
+    sRlPipeFd = -1;
+    return;
+  }
+  if (written < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      // Python 消费太慢，管道满，本帧丢弃（非阻塞模式）
+      EV << "WARNING: RL pipe full, dropping frame " << f.frame << " node "
+         << myId << " data." << endl;
+    } else {
+      // 管道另一端关闭，重置 fd，等待下次重连
+      EV << "WARNING: RL pipe write error: " << strerror(errno)
+         << ". Will reconnect." << endl;
+      close(sRlPipeFd);
+      sRlPipeFd = -1;
+    }
   }
 }
