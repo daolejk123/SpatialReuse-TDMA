@@ -1,4 +1,21 @@
+# 构建产物
 out/
-results/
-DynamicTDMA
 *.o
+DynamicTDMA
+
+# OMNeT++ 消息编译器生成文件
+*_m.cc
+*_m.h
+
+# 仿真结果
+results/
+
+# IDE / 编辑器
+.settings/
+.project
+.cproject
+.oppbuildspec
+.qtenvrc
+
+# Agent 工具
+.agent/
