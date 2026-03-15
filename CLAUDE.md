@@ -74,7 +74,7 @@ Makefile 会自动从 `TDMA_Messages.msg` 通过 OMNeT++ 的 `opp_msgc` 生成 `
 | 文件 | 职责 |
 |:---|:---|
 | `rl_receiver.py` | 管道读取、帧聚合、`connect()` 上下文管理器 |
-| `rl_agent.py` | `RLFeatureExtractor`（4M+10 维）、`LSTMActorCritic`、`TDMAAgent`（多节点状态管理） |
+| `rl_agent.py` | `RLFeatureExtractor`（4M+10 维）、`LSTMActorCritic`（LSTM-1 共享 + Actor LSTM-2a + Critic LSTM-2c）、`TDMAAgent`（多节点状态管理） |
 | `ppo_trainer.py` | PPO 训练循环：`RolloutBuffer`、`ppo_update()`、`train()` 主函数 |
 | `transformer_model.py` | 离线 Transformer 回归模型；`_parse_bown`/`_parse_t2hop` 被 RL 模块复用 |
 
