@@ -85,7 +85,7 @@ opp_makemake -f --deep -O out -I.
 source /home/opp_env/omnetpp-6.3.0/setenv
 
 # 1. 先启动训练脚本（等待仿真连接）
-python ppo_trainer.py --num_slots 10 --num_nodes 5
+python ppo_trainer.py --num_slots 10 --num_nodes 9
 
 # 2. 另一个终端启动仿真
 ./DynamicTDMA -f omnetpp.ini -u Cmdenv
@@ -93,10 +93,104 @@ python ppo_trainer.py --num_slots 10 --num_nodes 5
 
 训练日志示例：
 ```
-[PPO] frame=   32  update=   1  avg_r=+0.412  L_actor=-0.0023  L_critic=0.8821  entropy=0.6823
+[PPO] frame=   32  update=   1  avg_r=+44.367  L_actor=-0.0052  L_critic=3.3985  entropy=0.6928
 ```
 
 权重自动保存至 `checkpoints/tdma_ppo_latest.pt`，每 500 帧一个检查点。
+
+## 端到端验证
+
+以下步骤可验证 C++ 仿真 → 命名管道 → Python RL 训练的完整数据流是否走通。
+
+### 步骤 1：验证管道通信（rl_receiver 独立模式）
+
+使用 `rl_receiver.py` 的独立模式，确认仿真能将每帧特征正确推送到 Python 端：
+
+```bash
+source /home/opp_env/omnetpp-6.3.0/setenv
+
+# 终端 1：启动接收端
+python rl_receiver.py
+
+# 终端 2：启动仿真（短时间）
+./DynamicTDMA -f omnetpp.ini -u Cmdenv --sim-time-limit=3s
+```
+
+预期输出（终端 1）：
+
+```
+[RLReceiver] C++ 仿真已连接，开始接收特征 ...
+
+============================================================
+Frame 1  (9 nodes)
+============================================================
+  Node 0
+    [时隙感知]  Bown=0000010001  Cctrl=0  Hcoll=0
+    [队列/流量] Qt=2  λ_ewma=14.286  Wt=0.2700  mu_nbr=1.000
+    [公平性]    Sharet=0.000  Jlocal=1.000  Envy=0.000
+    [奖励信号]  Nsucc=2  Ncoll=0  Pt1_len=10
+    [状态向量维度] 20
+  ...
+```
+
+**验证要点**：每帧应收到 9 个节点的完整观测，各特征字段（时隙感知、队列、公平性、奖励信号）均有合理数值。
+
+### 步骤 2：验证 PPO 训练流程
+
+```bash
+source /home/opp_env/omnetpp-6.3.0/setenv
+
+# 终端 1：启动 PPO 训练
+python ppo_trainer.py --num_slots 10 --num_nodes 9
+
+# 终端 2：启动较长仿真
+./DynamicTDMA -f omnetpp.ini -u Cmdenv --sim-time-limit=60s
+```
+
+预期输出（终端 1）：
+
+```
+[PPO] 开始训练  num_slots=10 num_nodes=9
+[PPO] update_every=32  ppo_epochs=4  lr=0.0003
+[PPO] 等待仿真连接 /tmp/tdma_rl_state ...
+[RLReceiver] C++ 仿真已连接，开始接收特征 ...
+[PPO] frame=   32  update=   1  avg_r=+44.367  L_actor=-0.0052  L_critic=3.3985  entropy=0.6928  (99.2ms)
+[TDMAAgent] 权重已保存至 checkpoints/tdma_ppo_frame50.pt
+[PPO] frame=   64  update=   2  avg_r=+44.859  L_actor=+0.0021  L_critic=3.5749  entropy=0.6927  (82.1ms)
+[PPO] frame=   96  update=   3  avg_r=+44.558  L_actor=-0.0021  L_critic=3.6866  entropy=0.6925  (88.0ms)
+...
+```
+
+**验证要点**：
+- 每 32 帧触发一次 PPO 梯度更新
+- `avg_r` 平均奖励为正值（~44），表明节点成功获取时隙
+- `L_actor` / `L_critic` 损失有变化，表明网络在学习
+- `entropy` 接近 ln(2)≈0.693，策略尚未收敛（符合训练初期预期）
+- checkpoint 文件按设定间隔保存到 `checkpoints/` 目录
+
+### 步骤 3：一键验证脚本
+
+也可以在单终端内快速验证（后台启动 Python，前台跑仿真）：
+
+```bash
+source /home/opp_env/omnetpp-6.3.0/setenv
+rm -f /tmp/tdma_rl_state
+
+# 后台启动 PPO 训练
+python -u ppo_trainer.py --num_slots 10 --num_nodes 9 --save_every 50 > /tmp/ppo_out.log 2>&1 &
+PPO_PID=$!
+sleep 3
+
+# 前台运行仿真
+./DynamicTDMA -f omnetpp.ini -u Cmdenv --sim-time-limit=60s
+
+# 等待 PPO 处理完毕后查看结果
+sleep 2 && kill $PPO_PID 2>/dev/null
+echo "=== PPO 训练日志 ==="
+cat /tmp/ppo_out.log
+echo "=== 权重文件 ==="
+ls -lh checkpoints/
+```
 
 ## 网络架构
 
