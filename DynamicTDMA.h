@@ -174,6 +174,14 @@ protected:
   static const char *kRlPipePath;        // "/tmp/tdma_rl_state"
   static long long sRlReconnectCounter;  // 限速重连：每 N 帧重试一次
 
+  // RL 动作管道：Python → C++ 动作回传（闭环训练）
+  static int sRlActionPipeFd;
+  static const char *kRlActionPipePath;  // "/tmp/tdma_rl_action"
+  static long long sRlActionReconnectCounter;
+  // 缓存最新一帧的 RL 动作：sRlActionMap[nodeId][slot] = 申请概率
+  static std::map<int, std::vector<double>> sRlActionMap;
+  static long long sRlActionFrame;       // 缓存对应的帧号
+
   // --- 每帧详细指标（滑动窗口）---
   int statsWindowK = 10;
   double ewmaAlpha = 0.2;
@@ -242,6 +250,9 @@ protected:
   };
   void initRlPipe();
   void writeRlFeatures(const RlFrameFeatures &f);
+  void initRlActionPipe();
+  void readRlActions();
+  bool getRlActionProb(int slot, double &prob) const;
 
   // 可视化辅助：高亮/恢复链路颜色（仅 GUI 生效）
   int findOutGateIndexToNode(int destNodeId) const;

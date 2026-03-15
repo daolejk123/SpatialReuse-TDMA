@@ -5,7 +5,7 @@ PPO 训练循环，接入 rl_receiver.connect() 帧迭代器。
 
 架构（文档 6.6 节伪代码）：
   1. 每帧从仿真接收观测 → act_and_value() 得到 P_t 和 V(t)
-  2. 执行动作（此版本仅收集，动作回传 C++ 见步骤5）
+  2. 执行动作，通过动作管道回传 P_t 给 C++ 仿真（闭环）
   3. 收集轨迹 (F't, P_t, A_t) 到经验缓冲
   4. 每 K 帧执行一次 PPO 更新（Critic MSE + Actor PPO clipped）
   5. 定期保存权重
@@ -32,7 +32,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from rl_agent import TDMAAgent, RLFeatureExtractor, compute_reward
-from rl_receiver import connect, FrameObservation, NodeObservation
+from rl_receiver import connect, ActionSender, FrameObservation, NodeObservation
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +71,7 @@ class PPOConfig:
     device:   str  = "cpu"
     save_dir: str  = "checkpoints"
     pipe_path: str = "/tmp/tdma_rl_state"
+    action_pipe_path: str = "/tmp/tdma_rl_action"
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +215,10 @@ def train(cfg: PPOConfig):
     optimizer = optim.Adam(agent.net.parameters(), lr=cfg.lr)
     buffer    = RolloutBuffer()
 
+    # 动作回传管道（闭环训练）
+    action_sender = ActionSender(pipe_path=cfg.action_pipe_path)
+    action_sender.open()
+
     # 运行统计
     frame_count   = 0
     update_count  = 0
@@ -275,6 +280,12 @@ def train(cfg: PPOConfig):
                 node_actions: Dict[int, np.ndarray] = {
                     nid: agent.sample_action(p) for nid, p in node_probs.items()
                 }
+
+                # ── 2.5 回传动作概率给 C++ 仿真（闭环）────────────────────
+                action_sender.send(
+                    frame=frame_obs.frame,
+                    actions={nid: p.tolist() for nid, p in node_probs.items()},
+                )
 
                 # ── 3. 计算奖励 ───────────────────────────────────────────
                 node_rewards: Dict[int, float] = {
@@ -346,6 +357,7 @@ def train(cfg: PPOConfig):
     except KeyboardInterrupt:
         print(f"\n[PPO] 收到中断，共训练 {frame_count} 帧，{update_count} 次更新。")
     finally:
+        action_sender.close()
         last_ckpt = save_dir / "tdma_ppo_latest.pt"
         agent.save(str(last_ckpt))
 
@@ -368,6 +380,7 @@ def _parse_args() -> PPOConfig:
     p.add_argument("--device",       type=str,   default="cpu")
     p.add_argument("--save_dir",     type=str,   default="checkpoints")
     p.add_argument("--pipe_path",    type=str,   default="/tmp/tdma_rl_state")
+    p.add_argument("--action_pipe_path", type=str, default="/tmp/tdma_rl_action")
     args = p.parse_args()
     cfg = PPOConfig()
     for k, v in vars(args).items():

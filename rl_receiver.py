@@ -244,6 +244,91 @@ class RLReceiver:
 
 
 # ---------------------------------------------------------------------------
+# 动作回传：Python → C++（闭环训练）
+# ---------------------------------------------------------------------------
+
+ACTION_PIPE_PATH = "/tmp/tdma_rl_action"
+
+
+class ActionSender:
+    """
+    将 RL Agent 的动作概率回传给 C++ 仿真（通过第二根命名管道）。
+
+    协议：每帧一行 JSON，格式：
+      {"frame":N,"actions":{"0":[p0,p1,...,pM-1],"1":[p0,...],...}}
+
+    C++ 端以非阻塞方式读取，使用最新收到的动作替代启发式概率。
+    """
+
+    def __init__(self, pipe_path: str = ACTION_PIPE_PATH):
+        self.pipe_path = pipe_path
+        self._fd: Optional[int] = None
+
+    def open(self):
+        """创建并打开动作管道（写端）。"""
+        if not os.path.exists(self.pipe_path):
+            os.mkfifo(self.pipe_path, 0o666)
+            print(f"[ActionSender] 已创建动作管道 {self.pipe_path}")
+        elif not stat.S_ISFIFO(os.stat(self.pipe_path).st_mode):
+            raise RuntimeError(
+                f"{self.pipe_path} 存在但不是 FIFO，请手动删除后重试。"
+            )
+        # 以非阻塞方式打开写端（C++ 未打开读端时，open 会失败）
+        # 改用阻塞方式，因为 C++ 端在 initialize() 时已打开读端
+        try:
+            self._fd = os.open(self.pipe_path, os.O_WRONLY | os.O_NONBLOCK)
+            print(f"[ActionSender] 动作管道已连接 {self.pipe_path}")
+        except OSError:
+            print(f"[ActionSender] 动作管道暂未连接（C++ 仿真未启动），将延迟重试")
+            self._fd = None
+
+    def send(self, frame: int, actions: Dict[int, List[float]]):
+        """
+        发送一帧的动作概率。
+
+        Parameters
+        ----------
+        frame   : 帧号
+        actions : {node_id: [p0, p1, ..., pM-1]} 每个时隙的申请概率
+        """
+        if self._fd is None:
+            try:
+                self._fd = os.open(self.pipe_path, os.O_WRONLY | os.O_NONBLOCK)
+                print(f"[ActionSender] 动作管道已连接")
+            except OSError as e:
+                return  # C++ 还没准备好
+
+        # 构造 JSON 行
+        action_strs = []
+        for nid in sorted(actions.keys()):
+            probs_str = ",".join(f"{p:.4f}" for p in actions[nid])
+            action_strs.append(f'"{nid}":[{probs_str}]')
+        msg = '{"frame":' + str(frame) + ',"actions":{' + ",".join(action_strs) + '}}\n'
+
+        try:
+            os.write(self._fd, msg.encode())
+        except OSError as e:
+            if e.errno in (11, 35):  # EAGAIN / EWOULDBLOCK
+                pass  # 管道满，跳过
+            else:
+                # 管道断开，重置
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    pass
+                self._fd = None
+
+    def close(self):
+        """关闭管道。"""
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+
+
+# ---------------------------------------------------------------------------
 # 主入口函数：供 RL 训练代码调用
 # ---------------------------------------------------------------------------
 

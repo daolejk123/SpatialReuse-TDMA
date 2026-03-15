@@ -14,6 +14,13 @@ int DynamicTDMA::sRlPipeFd = -1;
 const char *DynamicTDMA::kRlPipePath = "/tmp/tdma_rl_state";
 long long DynamicTDMA::sRlReconnectCounter = 0;
 
+// RL 动作管道静态成员定义（Python → C++）
+int DynamicTDMA::sRlActionPipeFd = -1;
+const char *DynamicTDMA::kRlActionPipePath = "/tmp/tdma_rl_action";
+long long DynamicTDMA::sRlActionReconnectCounter = 0;
+std::map<int, std::vector<double>> DynamicTDMA::sRlActionMap;
+long long DynamicTDMA::sRlActionFrame = -1;
+
 static std::string buildTimestampedStatsPath(const std::string &prefix,
                                              bool useResultsDir) {
   std::time_t now = std::time(nullptr);
@@ -253,6 +260,7 @@ void DynamicTDMA::initialize() {
 
   // 初始化 RL 命名管道（所有节点共用，仅第一次执行）
   initRlPipe();
+  initRlActionPipe();
 }
 
 void DynamicTDMA::handleMessage(cMessage *msg) {
@@ -634,6 +642,8 @@ void DynamicTDMA::processSlotTimer() {
       generateTraffic();
     }
     if (currentSlotIndex == myId) {
+      // 尝试从 RL 动作管道读取最新动作（非阻塞，所有节点共享）
+      readRlActions();
       // 在申请阶段开始前，先生成这一帧可能的业务 (确保队列有数据)
       scheduleRequests(); // 智能调度 (替代 runDeepLearningModel)
       sendRTS();
@@ -1249,11 +1259,19 @@ void DynamicTDMA::scheduleRequests() {
     if (dynamicPrio > 0.99)
       dynamicPrio = 0.99;
 
-    // 基于优先级的概率申请：高优先级最低概率更高
-    double minProb = (pkt.priority >= 1) ? 0.6 : 0.2;
-    double reqProb = (dynamicPrio > minProb) ? dynamicPrio : minProb;
-    if ((int)packetQueue.size() >= highLoadThreshold) {
-      reqProb = std::min(1.0, reqProb + highLoadProbBoost);
+    // 申请概率：优先使用 RL 回传的 P_t，否则回退到启发式
+    double rlProb;
+    double reqProb;
+    if (getRlActionProb(slot, rlProb)) {
+      // RL 闭环模式：直接使用 Python 端回传的申请概率
+      reqProb = rlProb;
+    } else {
+      // 启发式回退（Python 未运行时）
+      double minProb = (pkt.priority >= 1) ? 0.6 : 0.2;
+      reqProb = (dynamicPrio > minProb) ? dynamicPrio : minProb;
+      if ((int)packetQueue.size() >= highLoadThreshold) {
+        reqProb = std::min(1.0, reqProb + highLoadProbBoost);
+      }
     }
     reqCandidateCount++;
     reqProbSum += reqProb;
@@ -1824,4 +1842,148 @@ void DynamicTDMA::writeRlFeatures(const RlFrameFeatures &f) {
       sRlPipeFd = -1;
     }
   }
+}
+
+// ------------------------------------------------------------------
+// RL 动作管道：Python → C++ 闭环回传
+// ------------------------------------------------------------------
+
+void DynamicTDMA::initRlActionPipe() {
+  if (sRlActionPipeFd >= 0)
+    return;
+
+  int ret = mkfifo(kRlActionPipePath, 0666);
+  if (ret < 0 && errno != EEXIST) {
+    EV << "WARNING: mkfifo(" << kRlActionPipePath
+       << ") failed: " << strerror(errno) << endl;
+    return;
+  }
+
+  sRlActionPipeFd = open(kRlActionPipePath, O_RDONLY | O_NONBLOCK);
+  if (sRlActionPipeFd < 0) {
+    EV << "INFO: RL action pipe not yet connected." << endl;
+  } else {
+    EV << "INFO: RL action pipe opened -> " << kRlActionPipePath << endl;
+  }
+}
+
+void DynamicTDMA::readRlActions() {
+  // 尝试打开管道（限速重连）
+  if (sRlActionPipeFd < 0) {
+    if ((sRlActionReconnectCounter++ % 10) != 0)
+      return;
+    sRlActionPipeFd = open(kRlActionPipePath, O_RDONLY | O_NONBLOCK);
+    if (sRlActionPipeFd < 0)
+      return;
+    EV << "INFO: RL action pipe reconnected." << endl;
+  }
+
+  // 非阻塞读取所有可用数据，保留最后一条完整消息
+  // 协议：每条消息以换行符分隔的 JSON 行
+  // 格式：{"frame":N, "actions":{"0":[p0,p1,...], "1":[p0,p1,...], ...}}
+  static std::string readBuf;
+  char tmp[4096];
+  ssize_t n;
+  while ((n = read(sRlActionPipeFd, tmp, sizeof(tmp))) > 0) {
+    readBuf.append(tmp, n);
+  }
+  if (n == 0) {
+    // 写端关闭（Python 退出），重置
+    close(sRlActionPipeFd);
+    sRlActionPipeFd = -1;
+    readBuf.clear();
+    return;
+  }
+  // n < 0 && errno == EAGAIN: 无更多数据，正常
+
+  // 找最后一条完整 JSON 行
+  size_t lastNl = readBuf.rfind('\n');
+  if (lastNl == std::string::npos)
+    return; // 还没收到完整行
+
+  // 找倒数第二个换行（或字符串开头）
+  size_t prevNl = readBuf.rfind('\n', lastNl - 1);
+  size_t lineStart = (prevNl == std::string::npos) ? 0 : prevNl + 1;
+  std::string lastLine = readBuf.substr(lineStart, lastNl - lineStart);
+
+  // 丢弃已处理的数据
+  readBuf = readBuf.substr(lastNl + 1);
+
+  if (lastLine.empty())
+    return;
+
+  // 简易 JSON 解析（不引入外部库）
+  // 格式：{"frame":N,"actions":{"0":[0.1,0.2,...],"1":[...],...}}
+  // 提取 frame
+  size_t framePos = lastLine.find("\"frame\":");
+  if (framePos == std::string::npos)
+    return;
+  long long frame = std::stoll(lastLine.substr(framePos + 8));
+
+  // 提取 actions 对象
+  size_t actPos = lastLine.find("\"actions\":{");
+  if (actPos == std::string::npos)
+    return;
+  size_t actStart = actPos + 10; // 指向 '{'
+
+  // 清空旧缓存
+  sRlActionMap.clear();
+  sRlActionFrame = frame;
+
+  // 逐节点解析：找 "nodeId":[...] 模式
+  size_t pos = actStart;
+  while (pos < lastLine.size()) {
+    // 找下一个 key（节点 ID）
+    size_t qStart = lastLine.find('"', pos);
+    if (qStart == std::string::npos || qStart >= lastLine.size() - 1)
+      break;
+    size_t qEnd = lastLine.find('"', qStart + 1);
+    if (qEnd == std::string::npos)
+      break;
+    std::string key = lastLine.substr(qStart + 1, qEnd - qStart - 1);
+
+    // 找数组开始 '['
+    size_t arrStart = lastLine.find('[', qEnd);
+    if (arrStart == std::string::npos)
+      break;
+    size_t arrEnd = lastLine.find(']', arrStart);
+    if (arrEnd == std::string::npos)
+      break;
+
+    // 解析数组中的浮点数
+    std::string arrStr = lastLine.substr(arrStart + 1, arrEnd - arrStart - 1);
+    std::vector<double> probs;
+    std::istringstream iss(arrStr);
+    std::string token;
+    while (std::getline(iss, token, ',')) {
+      try {
+        probs.push_back(std::stod(token));
+      } catch (...) {
+        break;
+      }
+    }
+
+    int nodeId = -1;
+    try {
+      nodeId = std::stoi(key);
+    } catch (...) {}
+    if (nodeId >= 0 && !probs.empty()) {
+      sRlActionMap[nodeId] = std::move(probs);
+    }
+
+    pos = arrEnd + 1;
+  }
+
+  EV << "INFO: RL action received for frame " << frame << " with "
+     << sRlActionMap.size() << " nodes." << endl;
+}
+
+bool DynamicTDMA::getRlActionProb(int slot, double &prob) const {
+  auto it = sRlActionMap.find(myId);
+  if (it == sRlActionMap.end())
+    return false;
+  if (slot < 0 || slot >= (int)it->second.size())
+    return false;
+  prob = it->second[slot];
+  return true;
 }

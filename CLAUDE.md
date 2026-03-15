@@ -28,7 +28,7 @@ opp_makemake -f --deep -O out -I.
 make clean
 
 # 启动 PPO 训练（先运行此命令，再启动仿真）
-python ppo_trainer.py --num_slots 10 --num_nodes 5
+python ppo_trainer.py --num_slots 10 --num_nodes 9
 ```
 
 Makefile 会自动从 `TDMA_Messages.msg` 通过 OMNeT++ 的 `opp_msgc` 生成 `TDMA_Messages_m.cc` 和 `TDMA_Messages_m.h`。请勿直接编辑 `*_m.cc`/`*_m.h` 文件。
@@ -57,6 +57,11 @@ Makefile 会自动从 `TDMA_Messages.msg` 通过 OMNeT++ 的 `opp_msgc` 生成 `
 
 管道为非阻塞写入（`O_NONBLOCK`），Python 未运行时仿真正常继续，每 10 帧重试连接一次。
 
+### RL 动作回传管道（闭环训练）
+Python 端通过 `/tmp/tdma_rl_action` 将 RL Agent 的动作概率 P_t 回传给 C++。C++ 在 `scheduleRequests()` 中优先使用 RL 回传的概率替代启发式 `reqProb`；Python 未运行时自动回退到启发式策略。
+- **协议格式**：每帧一行 JSON `{"frame":N,"actions":{"nodeId":[p0,...,pM-1],...}}`
+- **实现**：`ActionSender`（rl_receiver.py）写端 + `readRlActions()`/`getRlActionProb()`（DynamicTDMA.cc）读端
+
 ### 时隙选择（SlotSelection.cc/h）
 独立的 `SlotSelection` 命名空间，提供 `buildSlotOrder()` 函数 — 随机化时隙排序，对上一帧申请失败的时隙进行降级处理（通过 `avoidSlotsNextSchedule` 实现一次性退避）。
 
@@ -73,7 +78,7 @@ Makefile 会自动从 `TDMA_Messages.msg` 通过 OMNeT++ 的 `opp_msgc` 生成 `
 
 | 文件 | 职责 |
 |:---|:---|
-| `rl_receiver.py` | 管道读取、帧聚合、`connect()` 上下文管理器 |
+| `rl_receiver.py` | 管道读取、帧聚合、`connect()` 上下文管理器、`ActionSender` 动作回传 |
 | `rl_agent.py` | `RLFeatureExtractor`（4M+10 维）、`LSTMActorCritic`（LSTM-1 共享 + Actor LSTM-2a + Critic LSTM-2c）、`TDMAAgent`（多节点状态管理） |
 | `ppo_trainer.py` | PPO 训练循环：`RolloutBuffer`、`ppo_update()`、`train()` 主函数 |
 | `transformer_model.py` | 离线 Transformer 回归模型；`_parse_bown`/`_parse_t2hop` 被 RL 模块复用 |
