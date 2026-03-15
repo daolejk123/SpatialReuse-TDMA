@@ -105,19 +105,23 @@ python ppo_trainer.py --num_slots 10 --num_nodes 5
          │
          ▼
   ┌─────────────┐
-  │  LSTM-1     │  共享时序编码器（hidden=128）
+  │   LSTM-1    │  共享时序编码器（hidden=128）
   └──────┬──────┘
-         │ F't
+         │ F't (128维)
    ┌─────┴─────┐
    ▼           ▼
 ┌───────┐   ┌───────┐
-│LSTM-2 │   │  FC   │   Critic → V(t)（标量）
-│hidden │   │128→1  │
-│  =64  │
-│FC+Sig │
-└───────┘
- P_t ∈ (0,1)^M         Actor → 每时隙申请概率
+│LSTM-2a│   │LSTM-2c│
+│hidden │   │hidden │
+│  =64  │   │  =64  │
+│FC+Sig │   │FC → 1 │
+└───────┘   └───────┘
+ P_t ∈ (0,1)^M       V(t) 标量
+ Actor               Critic
+ 每时隙申请概率       状态价值估计
 ```
+
+Actor 和 Critic 各自拥有独立的 LSTM-2 层，隐状态跨帧持久传递，分别形成策略记忆和价值记忆。总参数量约 192K。
 
 ## 奖励函数
 

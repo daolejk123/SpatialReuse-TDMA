@@ -160,7 +160,7 @@ def ppo_update(
 
     for _ in range(cfg.ppo_epochs):
         # 前向（不带 LSTM-2 持久状态，梯度更新时重置）
-        probs, values, _, _ = net(feat_seqs)       # (N, M), (N,)
+        probs, values, _, _, _ = net(feat_seqs)     # (N, M), (N,)
 
         # log π(a|s)：M 个独立伯努利分布
         dist = torch.distributions.Bernoulli(probs=probs)
@@ -242,7 +242,8 @@ def train(cfg: PPOConfig):
                     window = agent._windows.setdefault(
                         nid, collections.deque(maxlen=cfg.seq_len)
                     )
-                    actor_state = agent._actor_states.get(nid)
+                    actor_state  = agent._actor_states.get(nid)
+                    critic_state = agent._critic_states.get(nid)
 
                     # 构造序列（不修改 window，收集阶段手动管理）
                     pad = cfg.seq_len - len(window) - 1
@@ -254,11 +255,16 @@ def train(cfg: PPOConfig):
                     x = feat_seq.unsqueeze(0).to(device)        # (1, T, d)
 
                     with torch.no_grad():
-                        probs_t, value_t, new_as, _ = agent.net(x, actor_state)
+                        probs_t, value_t, new_as, new_cs, _ = agent.net(
+                            x, actor_state, critic_state
+                        )
 
                     # 持久化 LSTM-2 状态
                     agent._actor_states[nid] = (
                         new_as[0].detach(), new_as[1].detach()
+                    )
+                    agent._critic_states[nid] = (
+                        new_cs[0].detach(), new_cs[1].detach()
                     )
                     window.append(feat)
 
