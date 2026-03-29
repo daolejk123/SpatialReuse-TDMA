@@ -58,12 +58,13 @@ class RLFeatureExtractor:
         "mu_nbr", "Sharet", "Share_avgnbr", "Jlocal", "Envy",
     )
 
-    def __init__(self, num_slots: int):
+    def __init__(self, num_slots: int, num_nodes: int = 1):
         self.num_slots = num_slots
+        self.num_nodes = num_nodes
 
     @property
     def input_dim(self) -> int:
-        return 4 * self.num_slots + 10
+        return 4 * self.num_slots + 10 + self.num_nodes
 
     def __call__(self, obs: NodeObservation) -> torch.Tensor:
         # 1) Bown：M 位
@@ -81,7 +82,13 @@ class RLFeatureExtractor:
             pt1 += [0.0] * (self.num_slots - len(pt1))
         pt1 = pt1[: self.num_slots]
 
-        return torch.tensor(bown + t2hop + numeric + pt1, dtype=torch.float32)
+        # 5) 节点 ID one-hot 编码：num_nodes 维，使各节点能学习差异化策略
+        node_onehot = [0.0] * self.num_nodes
+        nid = int(obs.node_id)
+        if 0 <= nid < self.num_nodes:
+            node_onehot[nid] = 1.0
+
+        return torch.tensor(bown + t2hop + numeric + pt1 + node_onehot, dtype=torch.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +202,7 @@ class TDMAAgent:
     def __init__(
         self,
         num_slots: int,
+        num_nodes: int = 1,
         seq_len: int = 10,
         lstm1_hidden: int = 128,
         lstm2_hidden: int = 64,
@@ -204,7 +212,7 @@ class TDMAAgent:
         self.seq_len   = seq_len
         self.device    = torch.device(device)
 
-        self.extractor = RLFeatureExtractor(num_slots)
+        self.extractor = RLFeatureExtractor(num_slots, num_nodes=num_nodes)
         self.net = LSTMActorCritic(
             input_dim    = self.extractor.input_dim,
             num_slots    = num_slots,
@@ -292,11 +300,14 @@ class TDMAAgent:
         print(f"[TDMAAgent] 权重已保存至 {path}")
 
     def load(self, path: str):
-        """从文件加载网络权重。"""
-        self.net.load_state_dict(
-            torch.load(path, map_location=self.device, weights_only=True)
-        )
-        print(f"[TDMAAgent] 权重已从 {path} 加载")
+        """从文件加载网络权重。维度不兼容时（如架构已改）打印警告并从头训练。"""
+        try:
+            self.net.load_state_dict(
+                torch.load(path, map_location=self.device, weights_only=True)
+            )
+            print(f"[TDMAAgent] 权重已从 {path} 加载")
+        except RuntimeError as e:
+            print(f"[TDMAAgent] 警告：权重维度不兼容（{e}），从头训练。")
 
     # ------------------------------------------------------------------
     # 内部实现
@@ -377,11 +388,12 @@ def compute_reward(
 
 if __name__ == "__main__":
     M   = 10  # 业务时隙数
+    N   = 9   # 节点数
     T   = 10  # 滑动窗口长度
     B   = 4   # batch size
 
-    extractor = RLFeatureExtractor(num_slots=M)
-    print(f"特征维度 = {extractor.input_dim}  (期望 4×{M}+10 = {4*M+10})")
+    extractor = RLFeatureExtractor(num_slots=M, num_nodes=N)
+    print(f"特征维度 = {extractor.input_dim}  (期望 4×{M}+10+{N} = {4*M+10+N})")
 
     net = LSTMActorCritic(input_dim=extractor.input_dim, num_slots=M)
     print(f"网络参数量 = {sum(p.numel() for p in net.parameters()):,}")

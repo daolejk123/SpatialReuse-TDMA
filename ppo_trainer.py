@@ -51,9 +51,10 @@ class PPOConfig:
     # PPO 超参数
     lr:           float = 3e-4
     gamma:        float = 0.99     # 折扣因子
+    gae_lambda:   float = 0.95     # GAE λ（方差-偏差折中）
     clip_eps:     float = 0.2      # PPO clipping ε
     vf_coef:      float = 0.5      # Critic 损失权重
-    ent_coef:     float = 0.01     # 熵正则化权重
+    ent_coef:     float = 0.05     # 熵正则化权重（增大以防止熵坍缩）
     max_grad_norm: float = 0.5     # 梯度裁剪
 
     # 训练节奏
@@ -63,7 +64,7 @@ class PPOConfig:
 
     # 奖励函数权重
     r_alpha: float = 1.0
-    r_beta:  float = 0.5
+    r_beta:  float = 1.0   # 碰撞惩罚加倍，抑制协同碰撞
     r_gamma: float = 0.3
     r_delta: float = 0.2
 
@@ -99,15 +100,16 @@ class RolloutBuffer:
     def add(self, node_id: int, trans: NodeTransition):
         self._buf[node_id].append(trans)
 
-    def compute_advantages(self, gamma: float):
-        """对每个节点反向计算 GAE advantage 和 return。"""
+    def compute_advantages(self, gamma: float, gae_lambda: float = 0.95):
+        """对每个节点反向计算 GAE(λ) advantage 和 return。"""
         for node_id, traj in self._buf.items():
-            ret = 0.0
+            gae = 0.0
             for t in reversed(range(len(traj))):
                 next_val = traj[t + 1].value if t + 1 < len(traj) else 0.0
-                ret = traj[t].reward + gamma * next_val
-                traj[t].ret = ret
-                traj[t].advantage = ret - traj[t].value
+                delta = traj[t].reward + gamma * next_val - traj[t].value
+                gae = delta + gamma * gae_lambda * gae
+                traj[t].advantage = gae
+                traj[t].ret = gae + traj[t].value
 
     def get_tensors(self, device: torch.device):
         """将所有节点的转移打平为训练所需张量。"""
@@ -207,6 +209,7 @@ def train(cfg: PPOConfig):
 
     agent = TDMAAgent(
         num_slots    = cfg.num_slots,
+        num_nodes    = cfg.num_nodes,
         seq_len      = cfg.seq_len,
         lstm1_hidden = cfg.lstm1_hidden,
         lstm2_hidden = cfg.lstm2_hidden,
@@ -329,7 +332,7 @@ def train(cfg: PPOConfig):
 
                 # ── 5. PPO 更新（每 update_every 帧）─────────────────────
                 if frame_count % cfg.update_every == 0:
-                    buffer.compute_advantages(cfg.gamma)
+                    buffer.compute_advantages(cfg.gamma, cfg.gae_lambda)
                     losses = ppo_update(
                         agent.net, optimizer, buffer, cfg, device
                     )
@@ -374,10 +377,14 @@ def _parse_args() -> PPOConfig:
     p.add_argument("--lr",           type=float, default=3e-4)
     p.add_argument("--gamma",        type=float, default=0.99)
     p.add_argument("--clip_eps",     type=float, default=0.2)
-    p.add_argument("--update_every", type=int,   default=32)
-    p.add_argument("--ppo_epochs",   type=int,   default=4)
-    p.add_argument("--save_every",   type=int,   default=500)
-    p.add_argument("--device",       type=str,   default="cpu")
+    p.add_argument("--ent_coef",      type=float, default=0.05)
+    p.add_argument("--vf_coef",       type=float, default=0.5)
+    p.add_argument("--gae_lambda",    type=float, default=0.95)
+    p.add_argument("--r_beta",        type=float, default=1.0)
+    p.add_argument("--update_every",  type=int,   default=32)
+    p.add_argument("--ppo_epochs",    type=int,   default=4)
+    p.add_argument("--save_every",    type=int,   default=500)
+    p.add_argument("--device",        type=str,   default="cpu")
     p.add_argument("--save_dir",     type=str,   default="checkpoints")
     p.add_argument("--pipe_path",    type=str,   default="/tmp/tdma_rl_state")
     p.add_argument("--action_pipe_path", type=str, default="/tmp/tdma_rl_action")
