@@ -73,6 +73,7 @@ class PPOConfig:
     save_dir: str  = "checkpoints"
     pipe_path: str = "/tmp/tdma_rl_state"
     action_pipe_path: str = "/tmp/tdma_rl_action"
+    load_ckpt: str = ""   # 非空则加载已有权重继续训练
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +221,10 @@ def train(cfg: PPOConfig):
         device       = cfg.device,
     )
     optimizer = optim.Adam(agent.net.parameters(), lr=cfg.lr)
+
+    if cfg.load_ckpt:
+        agent.load(cfg.load_ckpt)
+        print(f"[PPO] 已加载权重：{cfg.load_ckpt}")
     buffer    = RolloutBuffer()
 
     # 动作回传管道（闭环训练）
@@ -237,8 +242,9 @@ def train(cfg: PPOConfig):
 
     try:
         with connect(
-            num_nodes  = cfg.num_nodes,
-            pipe_path  = cfg.pipe_path,
+            num_nodes   = cfg.num_nodes,
+            pipe_path   = cfg.pipe_path,
+            buffer_size = 32768,   # 足够容纳单次仿真的所有帧（20s × ~700帧/s × 9节点）
         ) as frames:
             for frame_obs in frames:
                 frame_count += 1
@@ -392,6 +398,8 @@ def _parse_args() -> PPOConfig:
     p.add_argument("--save_dir",     type=str,   default="checkpoints")
     p.add_argument("--pipe_path",    type=str,   default="/tmp/tdma_rl_state")
     p.add_argument("--action_pipe_path", type=str, default="/tmp/tdma_rl_action")
+    p.add_argument("--load_ckpt",    type=str,   default="",
+                   help="加载已有权重继续训练，如 checkpoints/tdma_ppo_frame7000.pt")
     args = p.parse_args()
     cfg = PPOConfig()
     for k, v in vars(args).items():

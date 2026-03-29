@@ -60,7 +60,7 @@ opp_makemake -f --deep -O out -I.
 |:---|:---|
 | `rl_receiver.py` | 管道接收端：`connect()` 上下文管理器，按帧聚合节点观测 |
 | `rl_agent.py` | LSTM Actor-Critic 网络：`RLFeatureExtractor`、`LSTMActorCritic`、`TDMAAgent` |
-| `ppo_trainer.py` | PPO 在线训练循环：轨迹收集、advantage 计算、策略更新、权重保存 |
+| `ppo_trainer.py` | PPO 在线训练循环：轨迹收集、GA(λ=0.95)、策略更新、权重保存，支持 `--load_ckpt` 断点续训 |
 | `transformer_model.py` | Transformer 回归模型（离线流量预测，特征解析函数供 RL 复用） |
 
 ## RL 管道协议
@@ -97,6 +97,14 @@ python ppo_trainer.py --num_slots 10 --num_nodes 9
 ```
 
 权重自动保存至 `checkpoints/tdma_ppo_latest.pt`，每 500 帧一个检查点。
+
+### 断点续训
+
+支持加载已有权重继续训练：
+
+```bash
+python ppo_trainer.py --num_slots 10 --num_nodes 9 --load_ckpt checkpoints/tdma_ppo_frame7000.pt
+```
 
 ## 端到端验证
 
@@ -249,6 +257,29 @@ r_t = α·Nsucc - β·Ncoll + γ·Jlocal - δ·Wt
                                        Python RL Agent
                                        下一帧更新 P_t
 ```
+
+## 本周改进（2026-03-23 ~ 2026-03-29）
+
+### 1. RL 闭环训练实现
+- **动作回传管道**：Python 端通过 `/tmp/tdma_rl_action` 将 RL Agent 的动作概率 P_t 实时回传给 C++
+- C++ 端优先使用 RL 动作，未连接时自动回退到启发式策略
+
+### 2. PPO 奖励崩溃修复
+- **节点 ID 嵌入**：状态向量中加入 one-hot 节点 ID，使各节点能学习差异化策略
+- **GAE(λ=0.95)**：替代简单 TD 计算 advantage，减小方差
+- **熵正则化调整**：增大探索强度，避免过早收敛
+- **效果**：奖励崩溃从 frame 1920 延至 frame 4800（延长 3 倍），前 4800 帧 avg_r 维持 +82~+96
+
+### 3. 训练稳定性改进
+- **ActionSender 延迟连接修复**：确保 RL 动作尽早生效
+- **L_critic 归一化**：解决 Critic 损失全程偏高问题
+- **背压控制**：优化管道通信机制，防止数据堆积
+
+### 4. 新增功能
+- **断点续训**：`--load_ckpt` 参数支持加载已有权重继续训练
+- **延长仿真时长**：默认 20s 以观察长期训练效果
+
+详见 [算法改进记录.md](算法改进记录.md)
 
 ## 许可证
 

@@ -165,13 +165,21 @@ class RLReceiver:
             self._thread.join(timeout=3)
 
     def iter_frames(self) -> Generator[FrameObservation, None, None]:
-        """阻塞迭代器，每次 yield 一个完整帧的观测。"""
-        while not self._stop.is_set():
+        """阻塞迭代器，每次 yield 一个完整帧的观测。管道关闭后排空剩余缓冲再退出。"""
+        while True:
+            frame = None
             with self._cond:
                 while not self._buf and not self._stop.is_set():
                     self._cond.wait(timeout=1.0)
                 if self._buf:
-                    yield self._buf.popleft()
+                    frame = self._buf.popleft()
+                    # 通知后台线程：_buf 有空位，可以继续读取
+                    self._cond.notify_all()
+                elif self._stop.is_set():
+                    break
+            # yield 在锁外：释放锁后才暂停，使后台线程可进入 wait() 实现背压
+            if frame is not None:
+                yield frame
 
     # ------------------------------------------------------------------
     # 内部实现
@@ -188,19 +196,47 @@ class RLReceiver:
 
     def _recv_loop(self):
         print(f"[RLReceiver] 等待 C++ 仿真连接 {self.pipe_path} ...")
-        with open(self.pipe_path, "r", buffering=1) as pipe:
-            print("[RLReceiver] C++ 仿真已连接，开始接收特征 ...")
-            for line in pipe:
-                if self._stop.is_set():
-                    break
-                line = line.strip()
-                if not line:
-                    continue
+        # 使用 os.open + os.read 避免 Python 文件对象的内部预读缓冲，
+        # 以便在 _buf 满时暂停读取，从而对 C++ write() 产生真实背压。
+        fd = os.open(self.pipe_path, os.O_RDONLY)   # 阻塞 open，等待 C++ 打开写端
+        print("[RLReceiver] C++ 仿真已连接，开始接收特征 ...")
+        remainder = b""
+        line_count = 0
+        buf_size_at_close = 0
+        try:
+            while not self._stop.is_set():
                 try:
-                    self._handle_message(json.loads(line))
-                except json.JSONDecodeError as e:
-                    print(f"[RLReceiver] JSON 解析错误: {e}  raw={line[:80]}")
-        print("[RLReceiver] 管道已关闭（仿真结束或断开）。")
+                    chunk = os.read(fd, 4096)   # 每次最多读 4096 字节
+                except OSError:
+                    break
+                if not chunk:           # EOF：C++ 关闭了管道
+                    break
+                data = remainder + chunk
+                lines = data.split(b"\n")
+                remainder = lines[-1]   # 最后一段可能是不完整的行
+                for raw in lines[:-1]:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    line_count += 1
+                    try:
+                        self._handle_message(json.loads(raw.decode("utf-8")))
+                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                        print(f"[RLReceiver] JSON 解析错误: {e}  raw={raw[:80]}")
+        finally:
+            buf_size_at_close = len(self._buf)
+            os.close(fd)
+        # 管道关闭后，将 _pending 中尚未 emit 的不完整帧强制输出
+        pending_count = len(self._pending)
+        for f in sorted(self._pending.keys()):
+            self._emit_frame(f)
+        print(f"[RLReceiver] 管道已关闭：读取 {line_count} 行，"
+              f"_buf={buf_size_at_close}，pending={pending_count}，"
+              f"已 emit 待发帧={len(self._pending)}")
+        # 通知 iter_frames() 停止等待
+        with self._cond:
+            self._stop.set()
+            self._cond.notify_all()
 
     def _handle_message(self, raw: dict):
         frame   = raw["frame"]
