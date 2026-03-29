@@ -159,6 +159,10 @@ def ppo_update(
     # 标准化 advantage
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
+    # 标准化 return（Critic 训练目标）：降低 L_critic 量级，稳定梯度
+    # 注意：Critic 输出将对应归一化后的 return，下一轮 GAE 的 baseline 仍有效
+    returns_norm = (returns - returns.mean()) / (returns.std() + 1e-8)
+
     stats = collections.defaultdict(list)
 
     for _ in range(cfg.ppo_epochs):
@@ -180,8 +184,8 @@ def ppo_update(
         surr2 = torch.clamp(ratio, 1 - cfg.clip_eps, 1 + cfg.clip_eps) * advantages
         actor_loss  = -torch.min(surr1, surr2).mean()
 
-        # Critic MSE
-        critic_loss = nn.functional.mse_loss(values, returns)
+        # Critic MSE（使用归一化 return 作为目标，稳定 L_critic）
+        critic_loss = nn.functional.mse_loss(values, returns_norm)
 
         loss = actor_loss + cfg.vf_coef * critic_loss - cfg.ent_coef * entropy
 

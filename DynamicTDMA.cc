@@ -1753,15 +1753,15 @@ void DynamicTDMA::initRlPipe() {
     return;
   }
 
-  // 以非阻塞方式打开写端；若 Python 尚未打开读端，open() 返回 -1(ENXIO)，
-  // 仿真照常运行，后续帧会重试
-  sRlPipeFd = open(kRlPipePath, O_WRONLY | O_NONBLOCK);
+  // 阻塞等待 Python RL 训练器打开读端（作为启动同步点）
+  // 仿真在 Python 就绪前不会开始运行，确保 RL 闭环从第 1 帧生效
+  EV << "INFO: Waiting for Python RL trainer to connect " << kRlPipePath
+     << " ..." << endl;
+  sRlPipeFd = open(kRlPipePath, O_WRONLY);
   if (sRlPipeFd < 0) {
-    EV << "INFO: RL pipe not yet connected (Python receiver not running). "
-          "Will retry each frame."
-       << endl;
+    EV << "WARNING: RL pipe open failed: " << strerror(errno) << endl;
   } else {
-    EV << "INFO: RL pipe connected -> " << kRlPipePath << endl;
+    EV << "INFO: Python RL trainer connected -> " << kRlPipePath << endl;
   }
 }
 
@@ -1859,11 +1859,13 @@ void DynamicTDMA::initRlActionPipe() {
     return;
   }
 
-  sRlActionPipeFd = open(kRlActionPipePath, O_RDONLY | O_NONBLOCK);
+  // O_RDWR|O_NONBLOCK：同时持有读写端，防止无写者时 read() 返回 EOF(0)
+  // 若仅持有读端（O_RDONLY）且 Python 尚未写入，read() 会立即返回 0 导致误关闭
+  sRlActionPipeFd = open(kRlActionPipePath, O_RDWR | O_NONBLOCK);
   if (sRlActionPipeFd < 0) {
-    EV << "INFO: RL action pipe not yet connected." << endl;
+    EV << "INFO: RL action pipe open failed: " << strerror(errno) << endl;
   } else {
-    EV << "INFO: RL action pipe opened -> " << kRlActionPipePath << endl;
+    EV << "INFO: RL action pipe opened (O_RDWR) -> " << kRlActionPipePath << endl;
   }
 }
 
@@ -1872,10 +1874,10 @@ void DynamicTDMA::readRlActions() {
   if (sRlActionPipeFd < 0) {
     if ((sRlActionReconnectCounter++ % 10) != 0)
       return;
-    sRlActionPipeFd = open(kRlActionPipePath, O_RDONLY | O_NONBLOCK);
+    sRlActionPipeFd = open(kRlActionPipePath, O_RDWR | O_NONBLOCK);
     if (sRlActionPipeFd < 0)
       return;
-    EV << "INFO: RL action pipe reconnected." << endl;
+    EV << "INFO: RL action pipe reconnected (O_RDWR)." << endl;
   }
 
   // 非阻塞读取所有可用数据，保留最后一条完整消息
