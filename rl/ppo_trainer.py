@@ -31,8 +31,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from rl_agent import TDMAAgent, RLFeatureExtractor, compute_reward
-from rl_receiver import connect, ActionSender, FrameObservation, NodeObservation
+from .rl_agent import TDMAAgent, RLFeatureExtractor, compute_reward
+from .rl_receiver import connect, ActionSender, FrameObservation, NodeObservation
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +74,12 @@ class PPOConfig:
     pipe_path: str = "/tmp/tdma_rl_state"
     action_pipe_path: str = "/tmp/tdma_rl_action"
     load_ckpt: str = ""   # 非空则加载已有权重继续训练
+
+    # RL 同步配置（需与 omnetpp.ini 中的 rlSyncInterval 保持一致）
+    # 0 = 异步（默认，Python 不等待 C++）
+    # N > 0 = 每 N 帧 Python 切换为阻塞写，配合 C++ 端 select 等待，保证动作必达
+    sync_interval:  int   = 0
+    sync_timeout:   float = 5.0   # 阻塞写超时（秒）
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +234,11 @@ def train(cfg: PPOConfig):
     buffer    = RolloutBuffer()
 
     # 动作回传管道（闭环训练）
-    action_sender = ActionSender(pipe_path=cfg.action_pipe_path)
+    action_sender = ActionSender(
+        pipe_path=cfg.action_pipe_path,
+        sync_interval=cfg.sync_interval,
+        sync_timeout=cfg.sync_timeout,
+    )
     action_sender.open()
 
     # 运行统计
@@ -391,6 +401,12 @@ def _parse_args() -> PPOConfig:
     p.add_argument("--vf_coef",       type=float, default=0.5)
     p.add_argument("--gae_lambda",    type=float, default=0.95)
     p.add_argument("--r_beta",        type=float, default=1.0)
+    p.add_argument("--r_alpha",       type=float, default=1.0)
+    p.add_argument("--r_gamma",       type=float, default=0.3)
+    p.add_argument("--r_delta",       type=float, default=0.2)
+    p.add_argument("--lstm1_hidden",  type=int,   default=128)
+    p.add_argument("--lstm2_hidden",  type=int,   default=64)
+    p.add_argument("--max_grad_norm", type=float, default=0.5)
     p.add_argument("--update_every",  type=int,   default=32)
     p.add_argument("--ppo_epochs",    type=int,   default=4)
     p.add_argument("--save_every",    type=int,   default=500)
@@ -400,6 +416,10 @@ def _parse_args() -> PPOConfig:
     p.add_argument("--action_pipe_path", type=str, default="/tmp/tdma_rl_action")
     p.add_argument("--load_ckpt",    type=str,   default="",
                    help="加载已有权重继续训练，如 checkpoints/tdma_ppo_frame7000.pt")
+    p.add_argument("--sync_interval", type=int,   default=0,
+                   help="RL 同步间隔帧数（0=异步，N=每N帧阻塞写确保动作必达，需与 omnetpp.ini rlSyncInterval 一致）")
+    p.add_argument("--sync_timeout",  type=float, default=5.0,
+                   help="同步写超时（秒），超时后继续训练不阻塞")
     args = p.parse_args()
     cfg = PPOConfig()
     for k, v in vars(args).items():

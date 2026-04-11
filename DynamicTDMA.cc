@@ -227,6 +227,16 @@ void DynamicTDMA::initialize() {
   }
   lastReqProbAvg = 0.0;
 
+  // RL 同步参数（每 N 帧 node 0 等待 Python 回传动作，保证 on-policy 对齐）
+  if (hasPar("rlSyncInterval")) {
+    rlSyncInterval = par("rlSyncInterval");
+    if (rlSyncInterval < 0) rlSyncInterval = 0;
+  }
+  if (hasPar("rlSyncTimeoutSec")) {
+    rlSyncTimeoutSec = par("rlSyncTimeoutSec").doubleValue();
+    if (rlSyncTimeoutSec <= 0.0) rlSyncTimeoutSec = 5.0;
+  }
+
   timerMsg = new cMessage("slot-timer");
 
   // 初始化表
@@ -1869,73 +1879,51 @@ void DynamicTDMA::initRlActionPipe() {
   }
 }
 
-void DynamicTDMA::readRlActions() {
-  // 尝试打开管道（限速重连）
-  if (sRlActionPipeFd < 0) {
-    if ((sRlActionReconnectCounter++ % 10) != 0)
-      return;
-    sRlActionPipeFd = open(kRlActionPipePath, O_RDWR | O_NONBLOCK);
-    if (sRlActionPipeFd < 0)
-      return;
-    EV << "INFO: RL action pipe reconnected (O_RDWR)." << endl;
-  }
-
-  // 非阻塞读取所有可用数据，保留最后一条完整消息
-  // 协议：每条消息以换行符分隔的 JSON 行
-  // 格式：{"frame":N, "actions":{"0":[p0,p1,...], "1":[p0,p1,...], ...}}
-  static std::string readBuf;
-  char tmp[4096];
-  ssize_t n;
-  while ((n = read(sRlActionPipeFd, tmp, sizeof(tmp))) > 0) {
-    readBuf.append(tmp, n);
-  }
-  if (n == 0) {
-    // 写端关闭（Python 退出），重置
-    close(sRlActionPipeFd);
-    sRlActionPipeFd = -1;
-    readBuf.clear();
-    return;
-  }
-  // n < 0 && errno == EAGAIN: 无更多数据，正常
-
-  // 找最后一条完整 JSON 行
-  size_t lastNl = readBuf.rfind('\n');
+// ------------------------------------------------------------------
+// parseLastRlActionLine：从缓冲中提取最新一条完整 JSON 行并解析
+// 成功返回 true，并更新 sRlActionMap / sRlActionFrame
+// ------------------------------------------------------------------
+bool DynamicTDMA::parseLastRlActionLine(std::string &buf) {
+  // 找最后一条完整 JSON 行（以 '\n' 结尾）
+  size_t lastNl = buf.rfind('\n');
   if (lastNl == std::string::npos)
-    return; // 还没收到完整行
+    return false; // 还没收到完整行
 
-  // 找倒数第二个换行（或字符串开头）
-  size_t prevNl = readBuf.rfind('\n', lastNl - 1);
+  // 找倒数第二个换行（或字符串开头），取最后一条完整行
+  size_t prevNl = (lastNl > 0) ? buf.rfind('\n', lastNl - 1) : std::string::npos;
   size_t lineStart = (prevNl == std::string::npos) ? 0 : prevNl + 1;
-  std::string lastLine = readBuf.substr(lineStart, lastNl - lineStart);
+  std::string lastLine = buf.substr(lineStart, lastNl - lineStart);
 
-  // 丢弃已处理的数据
-  readBuf = readBuf.substr(lastNl + 1);
+  // 丢弃已处理的数据（保留 lastNl 之后的不完整部分）
+  buf = buf.substr(lastNl + 1);
 
   if (lastLine.empty())
-    return;
+    return false;
 
   // 简易 JSON 解析（不引入外部库）
   // 格式：{"frame":N,"actions":{"0":[0.1,0.2,...],"1":[...],...}}
-  // 提取 frame
   size_t framePos = lastLine.find("\"frame\":");
   if (framePos == std::string::npos)
-    return;
-  long long frame = std::stoll(lastLine.substr(framePos + 8));
+    return false;
+  long long frame = 0;
+  try {
+    frame = std::stoll(lastLine.substr(framePos + 8));
+  } catch (...) {
+    return false;
+  }
 
-  // 提取 actions 对象
   size_t actPos = lastLine.find("\"actions\":{");
   if (actPos == std::string::npos)
-    return;
+    return false;
   size_t actStart = actPos + 10; // 指向 '{'
 
-  // 清空旧缓存
+  // 清空旧缓存，写入新帧动作
   sRlActionMap.clear();
   sRlActionFrame = frame;
 
   // 逐节点解析：找 "nodeId":[...] 模式
   size_t pos = actStart;
   while (pos < lastLine.size()) {
-    // 找下一个 key（节点 ID）
     size_t qStart = lastLine.find('"', pos);
     if (qStart == std::string::npos || qStart >= lastLine.size() - 1)
       break;
@@ -1944,7 +1932,6 @@ void DynamicTDMA::readRlActions() {
       break;
     std::string key = lastLine.substr(qStart + 1, qEnd - qStart - 1);
 
-    // 找数组开始 '['
     size_t arrStart = lastLine.find('[', qEnd);
     if (arrStart == std::string::npos)
       break;
@@ -1952,7 +1939,6 @@ void DynamicTDMA::readRlActions() {
     if (arrEnd == std::string::npos)
       break;
 
-    // 解析数组中的浮点数
     std::string arrStr = lastLine.substr(arrStart + 1, arrEnd - arrStart - 1);
     std::vector<double> probs;
     std::istringstream iss(arrStr);
@@ -1966,9 +1952,7 @@ void DynamicTDMA::readRlActions() {
     }
 
     int nodeId = -1;
-    try {
-      nodeId = std::stoi(key);
-    } catch (...) {}
+    try { nodeId = std::stoi(key); } catch (...) {}
     if (nodeId >= 0 && !probs.empty()) {
       sRlActionMap[nodeId] = std::move(probs);
     }
@@ -1976,8 +1960,125 @@ void DynamicTDMA::readRlActions() {
     pos = arrEnd + 1;
   }
 
-  EV << "INFO: RL action received for frame " << frame << " with "
-     << sRlActionMap.size() << " nodes." << endl;
+  return !sRlActionMap.empty();
+}
+
+void DynamicTDMA::readRlActions() {
+  // 尝试打开管道（限速重连）
+  if (sRlActionPipeFd < 0) {
+    if ((sRlActionReconnectCounter++ % 10) != 0)
+      return;
+    sRlActionPipeFd = open(kRlActionPipePath, O_RDWR | O_NONBLOCK);
+    if (sRlActionPipeFd < 0)
+      return;
+    EV << "INFO: RL action pipe reconnected (O_RDWR)." << endl;
+  }
+
+  // 共享读缓冲（跨调用持久，由 parseLastRlActionLine 管理剩余数据）
+  static std::string readBuf;
+
+  // --- 内联 drain helper：非阻塞读取管道所有可用数据 ---
+  // 返回值：0=EOF(写端已关闭), 1=有新数据, -1=无新数据(EAGAIN)
+  auto drainPipe = [&]() -> int {
+    char tmp[4096];
+    bool gotData = false;
+    ssize_t n;
+    while ((n = read(sRlActionPipeFd, tmp, sizeof(tmp))) > 0) {
+      readBuf.append(tmp, n);
+      gotData = true;
+    }
+    if (n == 0) return 0;          // EOF：写端关闭
+    return gotData ? 1 : -1;       // 1=有新数据, -1=EAGAIN 无数据
+  };
+
+  // 第一次非阻塞读取 + 解析
+  int drainRet = drainPipe();
+  if (drainRet == 0) {
+    // 写端关闭（Python 退出），重置
+    close(sRlActionPipeFd);
+    sRlActionPipeFd = -1;
+    readBuf.clear();
+    return;
+  }
+  bool parsed = parseLastRlActionLine(readBuf);
+  if (parsed) {
+    EV << "INFO: RL action received for frame " << sRlActionFrame
+       << " with " << sRlActionMap.size() << " nodes." << endl;
+  }
+
+  // ------------------------------------------------------------------
+  // 同步等待模式：
+  // 仅由 node 0（最先进入请求阶段的节点）执行阻塞等待。
+  // 等待条件：sRlActionFrame < frameCounter（Python 尚未回传本帧动作）
+  // 超时后打印告警并回退到启发式策略，不影响仿真继续运行。
+  // ------------------------------------------------------------------
+  if (rlSyncInterval <= 0 || myId != 0 || frameCounter == 0)
+    return;
+  if ((frameCounter % (long long)rlSyncInterval) != 0)
+    return;
+  if (sRlActionPipeFd < 0)
+    return;
+  if (sRlActionFrame >= frameCounter)
+    return; // 已有最新动作，无需等待
+
+  EV << "INFO: RL sync wait start (frame=" << frameCounter
+     << ", timeout=" << rlSyncTimeoutSec << "s)" << endl;
+
+  // 计算超时截止时间点（wall clock）
+  struct timeval deadline;
+  gettimeofday(&deadline, nullptr);
+  long usecTotal = (long)(rlSyncTimeoutSec * 1e6);
+  deadline.tv_sec  += usecTotal / 1000000L;
+  deadline.tv_usec += usecTotal % 1000000L;
+  if (deadline.tv_usec >= 1000000L) {
+    deadline.tv_sec++;
+    deadline.tv_usec -= 1000000L;
+  }
+
+  while (sRlActionFrame < frameCounter) {
+    // 计算距截止还剩多少时间
+    struct timeval now, tv;
+    gettimeofday(&now, nullptr);
+    tv.tv_sec  = deadline.tv_sec  - now.tv_sec;
+    tv.tv_usec = deadline.tv_usec - now.tv_usec;
+    if (tv.tv_usec < 0) { tv.tv_sec--; tv.tv_usec += 1000000L; }
+    if (tv.tv_sec < 0) {
+      EV << "WARNING: RL sync timed out waiting for frame " << frameCounter
+         << " action, falling back to heuristic." << endl;
+      break;
+    }
+
+    // select() 阻塞等待管道可读（或超时）
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(sRlActionPipeFd, &rfds);
+    int ret = select(sRlActionPipeFd + 1, &rfds, nullptr, nullptr, &tv);
+    if (ret < 0) {
+      EV << "WARNING: RL sync select() error: " << strerror(errno) << endl;
+      break;
+    }
+    if (ret == 0) {
+      // 整体超时（tv 已耗尽）
+      EV << "WARNING: RL sync timed out waiting for frame " << frameCounter
+         << " action, falling back to heuristic." << endl;
+      break;
+    }
+
+    // 管道有数据可读
+    drainRet = drainPipe();
+    if (drainRet == 0) {
+      // 写端关闭（Python 退出）
+      close(sRlActionPipeFd);
+      sRlActionPipeFd = -1;
+      readBuf.clear();
+      EV << "WARNING: RL action pipe closed during sync wait." << endl;
+      break;
+    }
+    if (parseLastRlActionLine(readBuf)) {
+      EV << "INFO: RL sync OK for frame " << frameCounter
+         << " (received frame " << sRlActionFrame << ")." << endl;
+    }
+  }
 }
 
 bool DynamicTDMA::getRlActionProb(int slot, double &prob) const {

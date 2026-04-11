@@ -29,6 +29,12 @@ simple DynamicTDMA
         int statsWindowK = default(10);
         double ewmaAlpha = default(0.2);
 
+        // RL 同步参数
+        // 0 = 关闭同步（原有异步行为）
+        // N > 0 = 每 N 帧强制等待 Python 回传一次动作，保证 on-policy 对齐
+        int rlSyncInterval = default(0);
+        double rlSyncTimeoutSec = default(5.0); // 同步等待超时（秒），超时后回退到启发式
+
         // 仿真显示相关
         @display("i=block/mac");
 

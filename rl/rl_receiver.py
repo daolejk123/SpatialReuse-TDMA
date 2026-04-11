@@ -24,6 +24,7 @@ rl_receiver.py
   from rl_receiver import RLReceiver, FrameObservation
 """
 
+import fcntl
 import os
 import json
 import stat
@@ -293,11 +294,23 @@ class ActionSender:
     协议：每帧一行 JSON，格式：
       {"frame":N,"actions":{"0":[p0,p1,...,pM-1],"1":[p0,...],...}}
 
-    C++ 端以非阻塞方式读取，使用最新收到的动作替代启发式概率。
+    Parameters
+    ----------
+    pipe_path     : 动作管道路径，需与 C++ 端 kRlActionPipePath 一致
+    sync_interval : 0=异步（默认）；N>0 则每 N 帧切换为阻塞写，
+                    配合 C++ 端 rlSyncInterval 使用，确保动作必达
+    sync_timeout  : 阻塞写的超时时间（秒），超时后继续（不阻塞训练）
     """
 
-    def __init__(self, pipe_path: str = ACTION_PIPE_PATH):
-        self.pipe_path = pipe_path
+    def __init__(
+        self,
+        pipe_path: str = ACTION_PIPE_PATH,
+        sync_interval: int = 0,
+        sync_timeout: float = 5.0,
+    ):
+        self.pipe_path    = pipe_path
+        self.sync_interval = sync_interval
+        self.sync_timeout  = sync_timeout
         self._fd: Optional[int] = None
 
     def open(self):
@@ -309,8 +322,6 @@ class ActionSender:
             raise RuntimeError(
                 f"{self.pipe_path} 存在但不是 FIFO，请手动删除后重试。"
             )
-        # 以非阻塞方式打开写端（C++ 未打开读端时，open 会失败）
-        # 改用阻塞方式，因为 C++ 端在 initialize() 时已打开读端
         try:
             self._fd = os.open(self.pipe_path, os.O_WRONLY | os.O_NONBLOCK)
             print(f"[ActionSender] 动作管道已连接 {self.pipe_path}")
@@ -322,6 +333,10 @@ class ActionSender:
         """
         发送一帧的动作概率。
 
+        异步模式（sync_interval=0）：非阻塞写，管道满时静默跳过。
+        同步模式（sync_interval=N）：当 frame % N == 0 时切换为阻塞写，
+          确保 C++ 一定能读到本帧动作（配合 C++ 端 select 等待使用）。
+
         Parameters
         ----------
         frame   : 帧号
@@ -331,7 +346,7 @@ class ActionSender:
             try:
                 self._fd = os.open(self.pipe_path, os.O_WRONLY | os.O_NONBLOCK)
                 print(f"[ActionSender] 动作管道已连接")
-            except OSError as e:
+            except OSError:
                 return  # C++ 还没准备好
 
         # 构造 JSON 行
@@ -339,29 +354,72 @@ class ActionSender:
         for nid in sorted(actions.keys()):
             probs_str = ",".join(f"{p:.4f}" for p in actions[nid])
             action_strs.append(f'"{nid}":[{probs_str}]')
-        msg = '{"frame":' + str(frame) + ',"actions":{' + ",".join(action_strs) + '}}\n'
+        msg = ('{"frame":' + str(frame) + ',"actions":{'
+               + ",".join(action_strs) + '}}\n').encode()
 
+        # 判断是否需要同步写（阻塞写，确保 C++ 一定能读到）
+        use_blocking = (
+            self.sync_interval > 0
+            and frame > 0
+            and (frame % self.sync_interval) == 0
+        )
+
+        if use_blocking:
+            self._send_blocking(msg)
+        else:
+            self._send_nonblocking(msg)
+
+    def _send_nonblocking(self, msg: bytes):
+        """非阻塞写，管道满时静默丢弃（异步模式）。"""
         try:
-            os.write(self._fd, msg.encode())
+            os.write(self._fd, msg)
         except OSError as e:
             if e.errno in (11, 35):  # EAGAIN / EWOULDBLOCK
                 pass  # 管道满，跳过
             else:
-                # 管道断开，重置
+                self._reset_fd()
+
+    def _send_blocking(self, msg: bytes):
+        """
+        阻塞写：临时将管道切换为阻塞模式，确保消息写入成功。
+        带超时保护（使用 select），超时后恢复非阻塞并静默继续。
+        """
+        import select as _select  # 避免与 module-level 命名冲突
+        try:
+            # 切换为阻塞模式
+            flags = fcntl.fcntl(self._fd, fcntl.F_GETFL)
+            fcntl.fcntl(self._fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+
+            # 等待管道可写（带超时）
+            _, writable, _ = _select.select([], [self._fd], [], self.sync_timeout)
+            if writable:
+                os.write(self._fd, msg)
+            else:
+                print(f"[ActionSender] 同步写超时（frame already in send_blocking）")
+        except OSError as e:
+            print(f"[ActionSender] 同步写失败: {e}")
+            self._reset_fd()
+        finally:
+            # 始终恢复非阻塞模式
+            if self._fd is not None:
                 try:
-                    os.close(self._fd)
+                    flags = fcntl.fcntl(self._fd, fcntl.F_GETFL)
+                    fcntl.fcntl(self._fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
                 except OSError:
                     pass
-                self._fd = None
+
+    def _reset_fd(self):
+        """关闭并重置 fd，等待下次重连。"""
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
+        self._fd = None
 
     def close(self):
         """关闭管道。"""
         if self._fd is not None:
-            try:
-                os.close(self._fd)
-            except OSError:
-                pass
-            self._fd = None
+            self._reset_fd()
 
 
 # ---------------------------------------------------------------------------

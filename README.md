@@ -58,10 +58,17 @@ opp_makemake -f --deep -O out -I.
 
 | 文件 | 说明 |
 |:---|:---|
-| `rl_receiver.py` | 管道接收端：`connect()` 上下文管理器，按帧聚合节点观测 |
-| `rl_agent.py` | LSTM Actor-Critic 网络：`RLFeatureExtractor`、`LSTMActorCritic`、`TDMAAgent` |
-| `ppo_trainer.py` | PPO 在线训练循环：轨迹收集、GA(λ=0.95)、策略更新、权重保存，支持 `--load_ckpt` 断点续训 |
-| `transformer_model.py` | Transformer 回归模型（离线流量预测，特征解析函数供 RL 复用） |
+| `rl/rl_receiver.py` | 管道接收端：`connect()` 上下文管理器，按帧聚合节点观测 |
+| `rl/rl_agent.py` | LSTM Actor-Critic 网络：`RLFeatureExtractor`、`LSTMActorCritic`、`TDMAAgent` |
+| `rl/ppo_trainer.py` | PPO 在线训练循环：轨迹收集、GAE(λ=0.95)、策略更新、权重保存，支持 `--load_ckpt` 断点续训 |
+| `rl/transformer_model.py` | Transformer 回归模型（离线流量预测，特征解析函数供 RL 复用） |
+
+### 脚本与文档
+
+| 文件 | 说明 |
+|:---|:---|
+| `scripts/run_joint.sh` | 双端联合仿真一键启动：自动检查环境、按序启动 Python 训练器和仿真、监控双端进程 |
+| `docs/算法改进记录.md` | 训练问题分析与调优方向记录 |
 
 ## RL 管道协议
 
@@ -77,18 +84,22 @@ opp_makemake -f --deep -O out -I.
 }
 ```
 
-**状态向量维度**（M 个数据时隙）：`Bown(M) + T2hop(2M) + 数值特征(10) + Pt1(M) = 4M+10`
+**状态向量维度**（M 个数据时隙，N 个节点）：`Bown(M) + T2hop(2M) + 数值特征(10) + Pt1(M) + NodeID_onehot(N) = 4M+10+N`（默认 59 维）
 
 ## 训练流程
 
 ```bash
 source /home/opp_env/omnetpp-6.3.0/setenv
 
-# 1. 先启动训练脚本（等待仿真连接）
-python ppo_trainer.py --num_slots 10 --num_nodes 9
+# 推荐：一键启动（自动处理顺序）
+./scripts/run_joint.sh --num_slots 10 --num_nodes 9
 
-# 2. 另一个终端启动仿真
-./DynamicTDMA -f omnetpp.ini -u Cmdenv
+# 断点续训
+./scripts/run_joint.sh --num_slots 10 --num_nodes 9 --load_ckpt checkpoints/tdma_ppo_latest.pt
+
+# 手动启动（顺序不能颠倒）
+python -m rl.ppo_trainer --num_slots 10 --num_nodes 9  # 第一步
+./DynamicTDMA -f omnetpp.ini -u Cmdenv                 # 第二步
 ```
 
 训练日志示例：
@@ -103,7 +114,9 @@ python ppo_trainer.py --num_slots 10 --num_nodes 9
 支持加载已有权重继续训练：
 
 ```bash
-python ppo_trainer.py --num_slots 10 --num_nodes 9 --load_ckpt checkpoints/tdma_ppo_frame7000.pt
+./scripts/run_joint.sh --num_slots 10 --num_nodes 9 --load_ckpt checkpoints/tdma_ppo_frame7000.pt
+# 或手动
+python -m rl.ppo_trainer --num_slots 10 --num_nodes 9 --load_ckpt checkpoints/tdma_ppo_frame7000.pt
 ```
 
 ## 端到端验证
@@ -112,13 +125,13 @@ python ppo_trainer.py --num_slots 10 --num_nodes 9 --load_ckpt checkpoints/tdma_
 
 ### 步骤 1：验证管道通信（rl_receiver 独立模式）
 
-使用 `rl_receiver.py` 的独立模式，确认仿真能将每帧特征正确推送到 Python 端：
+使用 `rl/rl_receiver.py` 的独立模式，确认仿真能将每帧特征正确推送到 Python 端：
 
 ```bash
 source /home/opp_env/omnetpp-6.3.0/setenv
 
 # 终端 1：启动接收端
-python rl_receiver.py
+python -m rl.rl_receiver
 
 # 终端 2：启动仿真（短时间）
 ./DynamicTDMA -f omnetpp.ini -u Cmdenv --sim-time-limit=3s
@@ -149,7 +162,7 @@ Frame 1  (9 nodes)
 source /home/opp_env/omnetpp-6.3.0/setenv
 
 # 终端 1：启动 PPO 训练
-python ppo_trainer.py --num_slots 10 --num_nodes 9
+python -m rl.ppo_trainer --num_slots 10 --num_nodes 9
 
 # 终端 2：启动较长仿真
 ./DynamicTDMA -f omnetpp.ini -u Cmdenv --sim-time-limit=60s
@@ -185,7 +198,7 @@ source /home/opp_env/omnetpp-6.3.0/setenv
 rm -f /tmp/tdma_rl_state
 
 # 后台启动 PPO 训练
-python -u ppo_trainer.py --num_slots 10 --num_nodes 9 --save_every 50 > /tmp/ppo_out.log 2>&1 &
+python -u -m rl.ppo_trainer --num_slots 10 --num_nodes 9 --save_every 50 > /tmp/ppo_out.log 2>&1 &
 PPO_PID=$!
 sleep 3
 
@@ -203,7 +216,7 @@ ls -lh checkpoints/
 ## 网络架构
 
 ```
-观测序列 Ot = [o_{t-9}, ..., o_t]   shape: (T=10, 4M+10)
+观测序列 Ot = [o_{t-9}, ..., o_t]   shape: (T=10, 4M+10+N)
          │
          ▼
   ┌─────────────┐
@@ -279,7 +292,7 @@ r_t = α·Nsucc - β·Ncoll + γ·Jlocal - δ·Wt
 - **断点续训**：`--load_ckpt` 参数支持加载已有权重继续训练
 - **延长仿真时长**：默认 20s 以观察长期训练效果
 
-详见 [算法改进记录.md](算法改进记录.md)
+详见 [算法改进记录.md](docs/算法改进记录.md)
 
 ## 许可证
 

@@ -19,3 +19,17 @@ results/
 
 # Agent 工具
 .agent/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 运行日志
+logs/
+
+# 临时文件
+temp_docx_extract/
+tdma_run_*.ini
+
+# RL 模型权重
+checkpoints/

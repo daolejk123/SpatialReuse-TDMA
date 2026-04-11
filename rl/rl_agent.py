@@ -8,13 +8,14 @@ LSTM Actor-Critic 网络，用于 DynamicTDMA 强化学习时隙调度。
   Actor           ← LSTM-2（策略记忆）+ FC + Sigmoid → P_t ∈ (0,1)^M
   Critic          ← FC → 状态价值估计 V(t)
 
-状态向量维度（M 个数据时隙）：
+状态向量维度（M 个数据时隙，N 个节点）：
   Bown   : M        本帧时隙占用 bitmap（逐位）
   T2hop  : 2M       两跳邻居时隙状态（occupied_flag + min_hop_norm）
   Numeric: 10       Cctrl, Hcoll, Qt, λ_ewma, Wt, μ_nbr, Sharet, Share_avgnbr, Jlocal, Envy
   Pt1    : M        上一帧申请概率向量
+  NodeID : N        节点 ID one-hot 编码（N = numNodes）
   ─────────────────
-  总计   : 4M + 10
+  总计   : 4M + 10 + N
 
 用法：
   from rl_agent import TDMAAgent
@@ -35,8 +36,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from transformer_model import _parse_bown, _parse_t2hop
-from rl_receiver import FrameObservation, NodeObservation
+from .transformer_model import _parse_bown, _parse_t2hop
+from .rl_receiver import FrameObservation, NodeObservation
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +50,7 @@ class RLFeatureExtractor:
 
     复用 transformer_model 中的 _parse_bown / _parse_t2hop 解析函数，
     追加向量 Pt1（上一帧申请概率）以构成完整状态。
-    输入维度 = M + 2M + 10 + M = 4M + 10
+    输入维度 = M + 2M + 10 + M + N = 4M + 10 + N（N 为 numNodes）
     """
 
     # 标量数值特征（与文档 6.2.1 节对齐）

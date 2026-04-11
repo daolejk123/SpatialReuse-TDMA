@@ -10,7 +10,9 @@
 #include <vector>
 // RL pipe (POSIX named pipe)
 #include <fcntl.h>
+#include <sys/select.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 using namespace omnetpp;
@@ -168,6 +170,12 @@ protected:
   std::string fairnessCsvPath;
   std::string featureJsonlPath;
 
+  // RL 同步参数（从 omnetpp.ini 读取）
+  // rlSyncInterval = 0：异步（不等待，原有行为）
+  // rlSyncInterval = N：每 N 帧由 node 0 阻塞等待 Python 动作到达，确保 on-policy 对齐
+  int rlSyncInterval   = 0;
+  double rlSyncTimeoutSec = 5.0;
+
   // RL 命名管道：C++ → Python 实时特征推送
   // 所有节点共享同一个 fd（OMNeT++ 单线程，无竞争）
   static int sRlPipeFd;
@@ -253,6 +261,10 @@ protected:
   void initRlActionPipe();
   void readRlActions();
   bool getRlActionProb(int slot, double &prob) const;
+
+  // 从动作缓冲中解析最新一条完整 JSON 行，更新 sRlActionMap / sRlActionFrame
+  // 返回 true 表示成功解析到至少一条动作
+  static bool parseLastRlActionLine(std::string &buf);
 
   // 可视化辅助：高亮/恢复链路颜色（仅 GUI 生效）
   int findOutGateIndexToNode(int destNodeId) const;

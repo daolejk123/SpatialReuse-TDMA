@@ -5,7 +5,7 @@ network TDMANetwork
 {
     parameters:
         int numNodes = default(9); // 默认节点数量
-        int numDataSlots = default(18);
+        int numDataSlots = default(10);
         @display("bgb=795,748");    // 画布大小
 
     submodules:
