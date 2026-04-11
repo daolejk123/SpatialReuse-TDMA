@@ -67,6 +67,7 @@ ENT_COEF=""          # 空=使用 ppo_trainer 默认值
 PPO_EPOCHS=""
 R_GAMMA=""
 UPDATE_EVERY=""
+LR_DECAY_GAMMA=""
 
 # --------------------------------------------------------------------------
 # 参数解析
@@ -87,7 +88,8 @@ while [[ $# -gt 0 ]]; do
         --ent_coef)     ENT_COEF="$2";   shift 2 ;;
         --ppo_epochs)   PPO_EPOCHS="$2"; shift 2 ;;
         --r_gamma)      R_GAMMA="$2";    shift 2 ;;
-        --update_every) UPDATE_EVERY="$2"; shift 2 ;;
+        --update_every)    UPDATE_EVERY="$2";    shift 2 ;;
+        --lr_decay_gamma)  LR_DECAY_GAMMA="$2"; shift 2 ;;
         --gui)          USE_GUI=true;     shift ;;
         --rebuild)      REBUILD=true;     shift ;;
         --dry_run)      DRY_RUN=true;     shift ;;
@@ -297,7 +299,8 @@ PPO_CMD=(
 [ -n "$ENT_COEF" ]       && PPO_CMD+=(--ent_coef    "$ENT_COEF")
 [ -n "$PPO_EPOCHS" ]     && PPO_CMD+=(--ppo_epochs  "$PPO_EPOCHS")
 [ -n "$R_GAMMA" ]        && PPO_CMD+=(--r_gamma     "$R_GAMMA")
-[ -n "$UPDATE_EVERY" ]   && PPO_CMD+=(--update_every "$UPDATE_EVERY")
+[ -n "$UPDATE_EVERY" ]    && PPO_CMD+=(--update_every     "$UPDATE_EVERY")
+[ -n "$LR_DECAY_GAMMA" ] && PPO_CMD+=(--lr_decay_gamma  "$LR_DECAY_GAMMA")
 
 info "命令: ${PPO_CMD[*]}"
 

@@ -61,6 +61,7 @@ class PPOConfig:
     update_every: int   = 32       # 每 K 帧执行一次 PPO 更新
     ppo_epochs:   int   = 4        # 每次更新的梯度步数
     save_every:   int   = 500      # 每 N 帧保存一次权重
+    lr_decay_gamma: float = 0.9995 # 指数衰减：每次 PPO 更新后 lr *= lr_decay_gamma
 
     # 奖励函数权重
     r_alpha: float = 1.0
@@ -227,6 +228,7 @@ def train(cfg: PPOConfig):
         device       = cfg.device,
     )
     optimizer = optim.Adam(agent.net.parameters(), lr=cfg.lr)
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=cfg.lr_decay_gamma)
 
     if cfg.load_ckpt:
         agent.load(cfg.load_ckpt)
@@ -356,6 +358,7 @@ def train(cfg: PPOConfig):
                     losses = ppo_update(
                         agent.net, optimizer, buffer, cfg, device
                     )
+                    scheduler.step()
                     buffer.clear()
                     update_count += 1
 
@@ -363,12 +366,14 @@ def train(cfg: PPOConfig):
                     episode_rewards.clear()
 
                     elapsed = time.perf_counter() - t0
+                    cur_lr  = scheduler.get_last_lr()[0]
                     print(
                         f"[PPO] frame={frame_count:5d}  update={update_count:4d}  "
                         f"avg_r={avg_r:+.3f}  "
                         f"L_actor={losses['actor_loss']:+.4f}  "
                         f"L_critic={losses['critic_loss']:.4f}  "
                         f"entropy={losses['entropy']:.4f}  "
+                        f"lr={cur_lr:.2e}  "
                         f"({elapsed*1000:.1f}ms)"
                     )
 
@@ -407,8 +412,10 @@ def _parse_args() -> PPOConfig:
     p.add_argument("--lstm1_hidden",  type=int,   default=128)
     p.add_argument("--lstm2_hidden",  type=int,   default=64)
     p.add_argument("--max_grad_norm", type=float, default=0.5)
-    p.add_argument("--update_every",  type=int,   default=32)
-    p.add_argument("--ppo_epochs",    type=int,   default=4)
+    p.add_argument("--update_every",     type=int,   default=32)
+    p.add_argument("--ppo_epochs",       type=int,   default=4)
+    p.add_argument("--lr_decay_gamma",   type=float, default=0.9995,
+                   help="指数 LR 衰减：每次 PPO 更新后 lr *= lr_decay_gamma（1.0=不衰减）")
     p.add_argument("--save_every",    type=int,   default=500)
     p.add_argument("--device",        type=str,   default="cpu")
     p.add_argument("--save_dir",     type=str,   default="checkpoints")
