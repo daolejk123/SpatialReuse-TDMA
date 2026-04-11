@@ -54,7 +54,10 @@ class PPOConfig:
     gae_lambda:   float = 0.95     # GAE λ（方差-偏差折中）
     clip_eps:     float = 0.2      # PPO clipping ε
     vf_coef:      float = 0.5      # Critic 损失权重
-    ent_coef:     float = 0.05     # 熵正则化权重（增大以防止熵坍缩）
+    ent_coef:     float = 0.05     # 熵正则化权重（学习阶段；ent_coef_high 用于稳定阶段）
+    ent_coef_high: float = 0.10   # 稳定阶段熵系数（entropy 低时生效，防崩溃）
+    entropy_adapt_high: float = 0.55  # 高于此值：用 ent_coef（学习）；线性过渡起点
+    entropy_adapt_low:  float = 0.45  # 低于此值：用 ent_coef_high（稳定），防崩溃阈值
     max_grad_norm: float = 0.5     # 梯度裁剪
 
     # 训练节奏
@@ -247,6 +250,12 @@ def train(cfg: PPOConfig):
     frame_count   = 0
     update_count  = 0
     episode_rewards: Dict[int, float] = collections.defaultdict(float)
+    _ent_coef_base: float = cfg.ent_coef     # 学习阶段 ent_coef（自适应基准）
+    # 若加载 checkpoint（低熵状态），预设 _last_entropy=0 → 第一次更新即用 ent_coef_high
+    # 若从零初始化（高熵状态），预设 _last_entropy=entropy_adapt_high → 第一次用 ent_coef_base
+    _last_entropy: Optional[float] = (
+        0.0 if cfg.load_ckpt else cfg.entropy_adapt_high
+    )
 
     print(f"[PPO] 开始训练  num_slots={cfg.num_slots} num_nodes={cfg.num_nodes}")
     print(f"[PPO] update_every={cfg.update_every}  ppo_epochs={cfg.ppo_epochs}  lr={cfg.lr}")
@@ -354,6 +363,19 @@ def train(cfg: PPOConfig):
 
                 # ── 5. PPO 更新（每 update_every 帧）─────────────────────
                 if frame_count % cfg.update_every == 0:
+                    # 自适应 ent_coef：根据上次更新的熵值动态调整（防崩溃）
+                    if (_last_entropy is not None
+                            and cfg.ent_coef_high > _ent_coef_base
+                            and cfg.entropy_adapt_high > cfg.entropy_adapt_low > 0):
+                        if _last_entropy <= cfg.entropy_adapt_low:
+                            cfg.ent_coef = cfg.ent_coef_high
+                        elif _last_entropy < cfg.entropy_adapt_high:
+                            t = ((cfg.entropy_adapt_high - _last_entropy)
+                                 / (cfg.entropy_adapt_high - cfg.entropy_adapt_low))
+                            cfg.ent_coef = _ent_coef_base + t * (cfg.ent_coef_high - _ent_coef_base)
+                        else:
+                            cfg.ent_coef = _ent_coef_base
+
                     buffer.compute_advantages(cfg.gamma, cfg.gae_lambda)
                     losses = ppo_update(
                         agent.net, optimizer, buffer, cfg, device
@@ -361,6 +383,7 @@ def train(cfg: PPOConfig):
                     scheduler.step()
                     buffer.clear()
                     update_count += 1
+                    _last_entropy = losses['entropy']
 
                     avg_r = np.mean(list(episode_rewards.values()))
                     episode_rewards.clear()
@@ -373,6 +396,7 @@ def train(cfg: PPOConfig):
                         f"L_actor={losses['actor_loss']:+.4f}  "
                         f"L_critic={losses['critic_loss']:.4f}  "
                         f"entropy={losses['entropy']:.4f}  "
+                        f"ent={cfg.ent_coef:.3f}  "
                         f"lr={cur_lr:.2e}  "
                         f"({elapsed*1000:.1f}ms)"
                     )
@@ -403,6 +427,12 @@ def _parse_args() -> PPOConfig:
     p.add_argument("--gamma",        type=float, default=0.99)
     p.add_argument("--clip_eps",     type=float, default=0.2)
     p.add_argument("--ent_coef",      type=float, default=0.05)
+    p.add_argument("--ent_coef_high",      type=float, default=0.10,
+                   help="稳定阶段熵系数，entropy 低时生效（默认 0.10）")
+    p.add_argument("--entropy_adapt_high", type=float, default=0.55,
+                   help="高于此熵值时使用 ent_coef 学习模式（默认 0.55）")
+    p.add_argument("--entropy_adapt_low",  type=float, default=0.45,
+                   help="低于此熵值时使用 ent_coef_high 稳定模式（默认 0.45）")
     p.add_argument("--vf_coef",       type=float, default=0.5)
     p.add_argument("--gae_lambda",    type=float, default=0.95)
     p.add_argument("--r_beta",        type=float, default=1.0)
