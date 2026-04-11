@@ -18,6 +18,10 @@
 #   --sync_interval N    同步间隔帧数（默认 0=异步；1=每帧同步）
 #   --sync_timeout T     同步超时秒数（默认 5.0）
 #   --load_ckpt FILE     加载已有权重继续训练（如 checkpoints/tdma_ppo_latest.pt）
+#   --ent_coef F         熵正则化系数（默认 0.05；增大防熵坍缩）
+#   --ppo_epochs N       每次更新梯度步数（默认 4；减小防过拟合）
+#   --r_gamma F          公平性奖励权重（默认 0.3）
+#   --update_every N     每 N 帧执行一次 PPO 更新（默认 32）
 #   --log_dir DIR        日志目录（默认 logs/<timestamp>）
 #   --gui                使用 GUI 模式运行仿真（默认 Cmdenv 命令行模式）
 #   --rebuild            强制重新编译 DynamicTDMA
@@ -59,6 +63,10 @@ LOG_DIR=""           # 空=自动生成时间戳目录
 USE_GUI=false
 REBUILD=false
 DRY_RUN=false
+ENT_COEF=""          # 空=使用 ppo_trainer 默认值
+PPO_EPOCHS=""
+R_GAMMA=""
+UPDATE_EVERY=""
 
 # --------------------------------------------------------------------------
 # 参数解析
@@ -76,6 +84,10 @@ while [[ $# -gt 0 ]]; do
         --sync_timeout) SYNC_TIMEOUT="$2"; shift 2 ;;
         --load_ckpt)    LOAD_CKPT="$2";   shift 2 ;;
         --log_dir)      LOG_DIR="$2";     shift 2 ;;
+        --ent_coef)     ENT_COEF="$2";   shift 2 ;;
+        --ppo_epochs)   PPO_EPOCHS="$2"; shift 2 ;;
+        --r_gamma)      R_GAMMA="$2";    shift 2 ;;
+        --update_every) UPDATE_EVERY="$2"; shift 2 ;;
         --gui)          USE_GUI=true;     shift ;;
         --rebuild)      REBUILD=true;     shift ;;
         --dry_run)      DRY_RUN=true;     shift ;;
@@ -163,6 +175,10 @@ info "sync_timeout = $SYNC_TIMEOUT s"
 info "load_ckpt    = ${LOAD_CKPT:-（新训练，不加载权重）}"
 info "log_dir      = $LOG_DIR"
 info "use_gui      = $USE_GUI"
+[ -n "$ENT_COEF" ]    && info "ent_coef     = $ENT_COEF"
+[ -n "$PPO_EPOCHS" ]  && info "ppo_epochs   = $PPO_EPOCHS"
+[ -n "$R_GAMMA" ]     && info "r_gamma      = $R_GAMMA"
+[ -n "$UPDATE_EVERY" ] && info "update_every = $UPDATE_EVERY"
 
 if [ "$SYNC_INTERVAL" -gt 0 ] 2>/dev/null; then
     warn "同步模式已开启（sync_interval=$SYNC_INTERVAL），仿真速度将受 Python 推理速度限制"
@@ -277,7 +293,11 @@ PPO_CMD=(
     --sync_interval "$SYNC_INTERVAL"
     --sync_timeout  "$SYNC_TIMEOUT"
 )
-[ -n "$LOAD_CKPT_ARG" ] && PPO_CMD+=($LOAD_CKPT_ARG)
+[ -n "$LOAD_CKPT_ARG" ]  && PPO_CMD+=($LOAD_CKPT_ARG)
+[ -n "$ENT_COEF" ]       && PPO_CMD+=(--ent_coef    "$ENT_COEF")
+[ -n "$PPO_EPOCHS" ]     && PPO_CMD+=(--ppo_epochs  "$PPO_EPOCHS")
+[ -n "$R_GAMMA" ]        && PPO_CMD+=(--r_gamma     "$R_GAMMA")
+[ -n "$UPDATE_EVERY" ]   && PPO_CMD+=(--update_every "$UPDATE_EVERY")
 
 info "命令: ${PPO_CMD[*]}"
 
