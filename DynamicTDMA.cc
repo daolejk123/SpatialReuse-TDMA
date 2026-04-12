@@ -247,6 +247,7 @@ void DynamicTDMA::initialize() {
   rtsApplicantsBySlot.assign(numDataSlots, std::vector<int>{});
   avoidSlotsNextSchedule.assign(numDataSlots, false);
   prevPriorities.assign(numDataSlots, 0.0);
+  myHeurProbs.assign(numDataSlots, 0.0);
   frameSuccessfulSlots.assign(numDataSlots, false);
   nodeOccHistory.assign(numNodes, std::deque<int>{});
 
@@ -1080,7 +1081,7 @@ void DynamicTDMA::processSlotTimer() {
                      bownBitmap, t2hop.str(), ctrlCollisionCount, hcoll,
                      Qt, lambdaEwma, Wt, muNbr,
                      Sharet, ShareAvgNbr, Jlocal, Envy,
-                     (int)deltaTx, frameNcoll, prevPriorities});
+                     (int)deltaTx, frameNcoll, prevPriorities, myHeurProbs});
     // 保存本帧申请概率向量，供下一帧作为 Pt-1 特征
     prevPriorities = myPriorities;
 
@@ -1205,6 +1206,7 @@ void DynamicTDMA::scheduleRequests() {
   // 智能调度算法：优先为高优先级包申请
   myDesiredTargets.assign(numDataSlots, -1);
   myPriorities.assign(numDataSlots, 0.0);
+  myHeurProbs.assign(numDataSlots, 0.0);
 
   if (packetQueue.empty()) {
     EV << "Scheduler: Queue empty, no requests." << endl;
@@ -1269,19 +1271,23 @@ void DynamicTDMA::scheduleRequests() {
     if (dynamicPrio > 0.99)
       dynamicPrio = 0.99;
 
-    // 申请概率：优先使用 RL 回传的 P_t，否则回退到启发式
-    double rlProb;
+    // 启发式申请概率（始终计算，avoidSlotsNextSchedule 退避效果通过 slotOrder 已生效）
+    double minProb  = (pkt.priority >= 1) ? 0.6 : 0.2;
+    double heurProb = (dynamicPrio > minProb) ? dynamicPrio : minProb;
+    if ((int)packetQueue.size() >= highLoadThreshold) {
+      heurProb = std::min(1.0, heurProb + highLoadProbBoost);
+    }
+    myHeurProbs[slot] = heurProb;   // 保存供特征管道使用
+
+    // RL 乘数模式：α ∈ (0,1) 来自 Python Sigmoid 输出，解释为调整因子 2α ∈ (0,2)
+    // α≈0.5 → 乘数=1.0，等效纯启发式；α>0.5 → 放大；α<0.5 → 抑制
+    // avoidSlotsNextSchedule 退避效果通过 slotOrder 仍然完整生效
+    double rlAlpha;
     double reqProb;
-    if (getRlActionProb(slot, rlProb)) {
-      // RL 闭环模式：直接使用 Python 端回传的申请概率
-      reqProb = rlProb;
+    if (getRlActionProb(slot, rlAlpha)) {
+      reqProb = std::min(1.0, std::max(0.0, heurProb * rlAlpha * 2.0));
     } else {
-      // 启发式回退（Python 未运行时）
-      double minProb = (pkt.priority >= 1) ? 0.6 : 0.2;
-      reqProb = (dynamicPrio > minProb) ? dynamicPrio : minProb;
-      if ((int)packetQueue.size() >= highLoadThreshold) {
-        reqProb = std::min(1.0, reqProb + highLoadProbBoost);
-      }
+      reqProb = heurProb;
     }
     reqCandidateCount++;
     reqProbSum += reqProb;
@@ -1822,6 +1828,12 @@ void DynamicTDMA::writeRlFeatures(const RlFrameFeatures &f) {
   for (int i = 0; i < (int)f.pt1.size(); i++) {
     if (i > 0) oss << ",";
     oss << f.pt1[i];
+  }
+  oss       << "],"
+        << "\"HeurProb\":[";
+  for (int i = 0; i < (int)f.heurProbs.size(); i++) {
+    if (i > 0) oss << ",";
+    oss << std::fixed << std::setprecision(4) << f.heurProbs[i];
   }
   oss       << "]"
       << "}"

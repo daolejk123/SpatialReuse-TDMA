@@ -124,6 +124,9 @@ protected:
   // --- RL Pt-1：上一帧的申请概率向量，写入管道供 Python 端构造状态向量 ---
   std::vector<double> prevPriorities;
 
+  // --- RL 乘数模式：当前帧计算好的启发式申请概率，随特征一起传给 Python ---
+  std::vector<double> myHeurProbs;
+
   // 5. 复杂请求模块 (Complex Request Module)
   std::deque<PendingPacket> packetQueue;
   int packetIdCounter = 0;
@@ -255,6 +258,7 @@ protected:
     int nsucc;                    // 本帧成功传输时隙数
     int ncoll;                    // 本帧申请但遭遇冲突的时隙数
     std::vector<double> pt1;      // 上一帧申请概率向量 (Pt-1)
+    std::vector<double> heurProbs; // 本帧启发式申请概率向量（乘数基准，供 Python 感知）
   };
   void initRlPipe();
   void writeRlFeatures(const RlFrameFeatures &f);

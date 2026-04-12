@@ -22,6 +22,8 @@
 #   --ppo_epochs N       每次更新梯度步数（默认 4；减小防过拟合）
 #   --r_gamma F          公平性奖励权重（默认 0.3）
 #   --update_every N     每 N 帧执行一次 PPO 更新（默认 32）
+#   --bc_frames N        行为克隆预训练帧数（默认 0=跳过，建议 1000~2000）
+#   --bc_lr F            BC 预训练学习率（默认 1e-3）
 #   --log_dir DIR        日志目录（默认 logs/<timestamp>）
 #   --gui                使用 GUI 模式运行仿真（默认 Cmdenv 命令行模式）
 #   --rebuild            强制重新编译 DynamicTDMA
@@ -64,10 +66,13 @@ USE_GUI=false
 REBUILD=false
 DRY_RUN=false
 ENT_COEF=""          # 空=使用 ppo_trainer 默认值
+ENT_COEF_HIGH=""     # 空=使用 ppo_trainer 默认值
 PPO_EPOCHS=""
 R_GAMMA=""
 UPDATE_EVERY=""
 LR_DECAY_GAMMA=""
+BC_FRAMES=""
+BC_LR=""
 
 # --------------------------------------------------------------------------
 # 参数解析
@@ -85,11 +90,14 @@ while [[ $# -gt 0 ]]; do
         --sync_timeout) SYNC_TIMEOUT="$2"; shift 2 ;;
         --load_ckpt)    LOAD_CKPT="$2";   shift 2 ;;
         --log_dir)      LOG_DIR="$2";     shift 2 ;;
-        --ent_coef)     ENT_COEF="$2";   shift 2 ;;
+        --ent_coef)     ENT_COEF="$2";       shift 2 ;;
+        --ent_coef_high) ENT_COEF_HIGH="$2"; shift 2 ;;
         --ppo_epochs)   PPO_EPOCHS="$2"; shift 2 ;;
         --r_gamma)      R_GAMMA="$2";    shift 2 ;;
         --update_every)    UPDATE_EVERY="$2";    shift 2 ;;
         --lr_decay_gamma)  LR_DECAY_GAMMA="$2"; shift 2 ;;
+        --bc_frames)    BC_FRAMES="$2";  shift 2 ;;
+        --bc_lr)        BC_LR="$2";      shift 2 ;;
         --gui)          USE_GUI=true;     shift ;;
         --rebuild)      REBUILD=true;     shift ;;
         --dry_run)      DRY_RUN=true;     shift ;;
@@ -202,10 +210,10 @@ cleanup() {
     echo ""
     section "清理与退出"
 
-    # 停止 Python 训练器
+    # 停止 Python 训练器（用 SIGINT 让 Python finally 块正常保存权重）
     if [ -n "$PYTHON_PID" ] && kill -0 "$PYTHON_PID" 2>/dev/null; then
         info "停止 Python 训练器 (PID $PYTHON_PID)..."
-        kill "$PYTHON_PID" 2>/dev/null
+        kill -INT "$PYTHON_PID" 2>/dev/null
         wait "$PYTHON_PID" 2>/dev/null || true
         info "Python 训练器已退出"
     fi
@@ -289,18 +297,21 @@ LOAD_CKPT_ARG=""
 [ -n "$LOAD_CKPT" ] && LOAD_CKPT_ARG="--load_ckpt $LOAD_CKPT"
 
 PPO_CMD=(
-    python -m rl.ppo_trainer
+    python -u -m rl.ppo_trainer
     --num_slots   "$NUM_SLOTS"
     --num_nodes   "$NUM_NODES"
     --sync_interval "$SYNC_INTERVAL"
     --sync_timeout  "$SYNC_TIMEOUT"
 )
 [ -n "$LOAD_CKPT_ARG" ]  && PPO_CMD+=($LOAD_CKPT_ARG)
-[ -n "$ENT_COEF" ]       && PPO_CMD+=(--ent_coef    "$ENT_COEF")
+[ -n "$ENT_COEF" ]       && PPO_CMD+=(--ent_coef      "$ENT_COEF")
+[ -n "$ENT_COEF_HIGH" ]  && PPO_CMD+=(--ent_coef_high "$ENT_COEF_HIGH")
 [ -n "$PPO_EPOCHS" ]     && PPO_CMD+=(--ppo_epochs  "$PPO_EPOCHS")
 [ -n "$R_GAMMA" ]        && PPO_CMD+=(--r_gamma     "$R_GAMMA")
 [ -n "$UPDATE_EVERY" ]    && PPO_CMD+=(--update_every     "$UPDATE_EVERY")
 [ -n "$LR_DECAY_GAMMA" ] && PPO_CMD+=(--lr_decay_gamma  "$LR_DECAY_GAMMA")
+[ -n "$BC_FRAMES" ]     && PPO_CMD+=(--bc_frames      "$BC_FRAMES")
+[ -n "$BC_LR" ]         && PPO_CMD+=(--bc_lr          "$BC_LR")
 
 info "命令: ${PPO_CMD[*]}"
 

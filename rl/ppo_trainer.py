@@ -29,6 +29,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 from .rl_agent import TDMAAgent, RLFeatureExtractor, compute_reward
@@ -78,6 +79,10 @@ class PPOConfig:
     pipe_path: str = "/tmp/tdma_rl_state"
     action_pipe_path: str = "/tmp/tdma_rl_action"
     load_ckpt: str = ""   # 非空则加载已有权重继续训练
+
+    # 行为克隆（BC）预训练配置
+    bc_frames: int   = 0      # BC 预训练帧数（0 = 跳过，直接 RL）
+    bc_lr:     float = 1e-3   # BC 阶段学习率（通常高于 RL 的 lr）
 
     # RL 同步配置（需与 omnetpp.ini 中的 rlSyncInterval 保持一致）
     # 0 = 异步（默认，Python 不等待 C++）
@@ -214,6 +219,201 @@ def ppo_update(
 
 
 # ---------------------------------------------------------------------------
+# 多 Agent 检查点保存 / 加载（独立 Agent 格式）
+# ---------------------------------------------------------------------------
+
+def _save_agents(agents: Dict[int, "TDMAAgent"], path: str):
+    """保存所有节点 Agent 网络权重到单一文件（多 Agent 格式）。"""
+    ckpt = {
+        'num_nodes': len(agents),
+        'nodes': {nid: ag.net.state_dict() for nid, ag in agents.items()},
+    }
+    torch.save(ckpt, path)
+    print(f"[TDMAAgent] {len(agents)} 个节点权重已保存至 {path}")
+
+
+def _load_agents(agents: Dict[int, "TDMAAgent"], path: str, device: torch.device):
+    """
+    加载多 Agent 权重，兼容两种格式：
+      - 新格式（独立 Agent）：{'num_nodes': N, 'nodes': {nid: state_dict}}
+      - 旧格式（共享 Agent）：直接的 state_dict，广播到所有节点作为热启动
+    """
+    raw = torch.load(path, map_location=device, weights_only=True)
+    if isinstance(raw, dict) and 'nodes' in raw:
+        # 新格式：逐节点加载
+        for nid, ag in agents.items():
+            if nid in raw['nodes']:
+                try:
+                    ag.net.load_state_dict(raw['nodes'][nid])
+                except RuntimeError as e:
+                    print(f"[TDMAAgent] 警告：节点 {nid} 权重维度不兼容（{e}），从头训练。")
+        print(f"[TDMAAgent] {len(agents)} 个节点权重已从 {path} 加载（独立 Agent 格式）")
+    else:
+        # 旧格式：广播同一份权重到所有节点（作为行为克隆热启动基础）
+        for nid, ag in agents.items():
+            try:
+                ag.net.load_state_dict(raw)
+            except RuntimeError as e:
+                print(f"[TDMAAgent] 警告：节点 {nid} 权重维度不兼容（{e}），从头训练。")
+        print(f"[TDMAAgent] 旧格式权重已从 {path} 广播到 {len(agents)} 个节点")
+
+
+# ---------------------------------------------------------------------------
+# 行为克隆（BC）预训练
+# ---------------------------------------------------------------------------
+
+def bc_pretrain(cfg: PPOConfig):
+    """
+    [危险] BC 预训练在 RL 乘数模式下已废弃。
+
+    原因：RL 乘数模式下，网络输出 α≈0.5 对应"不改变启发式"（中性乘数=1.0）。
+    而 BC 用 Pt1（启发式申请概率，0.6~0.9 范围）作为监督目标，会训练网络输出
+    0.6~0.9，对应乘数 1.2~1.8，严重放大所有时隙的申请概率，绕过退避机制，
+    导致 avg_r 从 +82 暴跌至 +13 以下（已有实验数据验证）。
+
+    如需中性初始化，直接使用 actor_head 零初始化（已在 LSTMActorCritic.__init__ 中实现），
+    无需 BC。训练起点等价于纯启发式（avg_r ≈ +82~+96）。
+
+    如需复现旧版 BC 实验（调试/对比用），请注释下方 raise 并手动确认风险。
+    """
+    raise RuntimeError(
+        "bc_pretrain() 在 RL 乘数模式下被禁用。请使用 --bc_frames 0（默认）。\n"
+        "原因：Pt1 目标值（0.6~0.9）在乘数模式下对应乘数 1.2~1.8，会放大申请概率，\n"
+        "绕过 avoidSlotsNextSchedule 退避机制，历史实验 avg_r 暴跌至 +13。\n"
+        "如需复现旧版 BC，请手动注释 bc_pretrain() 函数体第一行的 raise。"
+    )
+    # -------------------------------------------------------------------------
+    # 以下为旧版 BC 代码，保留供参考 / 复现历史实验，不要在乘数模式下运行
+    # -------------------------------------------------------------------------
+    device = torch.device(cfg.device)
+    save_dir = Path(cfg.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # 初始化独立 Agent（每节点独立网络 + 优化器）
+    agents:     Dict[int, TDMAAgent]       = {}
+    optimizers: Dict[int, optim.Optimizer] = {}
+    for nid in range(cfg.num_nodes):
+        ag = TDMAAgent(
+            num_slots    = cfg.num_slots,
+            num_nodes    = cfg.num_nodes,
+            seq_len      = cfg.seq_len,
+            device       = str(device),
+            lstm1_hidden = cfg.lstm1_hidden,
+            lstm2_hidden = cfg.lstm2_hidden,
+        )
+        ag.net.to(device)
+        optimizers[nid] = optim.Adam(ag.net.parameters(), lr=cfg.bc_lr)
+        agents[nid] = ag
+
+    if cfg.load_ckpt:
+        _load_agents(agents, cfg.load_ckpt, device)
+
+    print(f"[BC] 行为克隆预训练  num_slots={cfg.num_slots} num_nodes={cfg.num_nodes}")
+    print(f"[BC] 目标帧数={cfg.bc_frames}  bc_lr={cfg.bc_lr}  update_every={cfg.update_every}")
+    print(f"[BC] 不发送 RL 动作 → C++ 使用启发式策略，Pt1 作为监督标签")
+    print(f"[BC] 等待仿真连接 {cfg.pipe_path} ...")
+
+    # prev_feat_seqs[nid] = 上一帧的序列特征张量 (T, d)，用于配对 Pt1 标签
+    prev_feat_seqs: Dict[int, Optional[torch.Tensor]] = {nid: None for nid in range(cfg.num_nodes)}
+    # bc_buf[nid] = [(feat_seq, pt1_target), ...]
+    bc_buf: Dict[int, list] = {nid: [] for nid in range(cfg.num_nodes)}
+
+    frame_count  = 0
+    update_count = 0
+
+    try:
+        with connect(
+            num_nodes   = cfg.num_nodes,
+            pipe_path   = cfg.pipe_path,
+            buffer_size = 32768,
+        ) as frames:
+            for frame_obs in frames:
+                frame_count += 1
+
+                for nid, obs in frame_obs.nodes.items():
+                    if nid >= cfg.num_nodes:
+                        continue
+                    ag = agents[nid]
+
+                    # 提取当前帧特征，先加入窗口
+                    feat = ag.extractor(obs)  # Tensor(d,)
+                    window = ag._windows.setdefault(
+                        nid, collections.deque(maxlen=cfg.seq_len)
+                    )
+                    window.append(feat)
+
+                    # 构建【当前帧】完整序列（含 feat_t）
+                    pad = cfg.seq_len - len(window)
+                    pads = [torch.zeros_like(feat)] * max(pad, 0)
+                    feat_seq_curr = torch.stack(
+                        (pads + list(window))[-cfg.seq_len:], dim=0
+                    )  # (T, d)，末尾为 feat_t
+
+                    # BC 训练对：(state_{t-1}, Pt1_t)
+                    # Pt1_t = 启发式在帧 t-1 的申请概率（= 对帧 t-1 state 的最优响应）
+                    if (prev_feat_seqs[nid] is not None
+                            and isinstance(obs.Pt1, list)
+                            and len(obs.Pt1) == cfg.num_slots):
+                        pt1 = torch.tensor(obs.Pt1, dtype=torch.float32)
+                        if pt1.sum() > 1e-6:   # 非零才有意义
+                            bc_buf[nid].append((prev_feat_seqs[nid], pt1))
+
+                    prev_feat_seqs[nid] = feat_seq_curr  # 保存当前帧序列，供下帧配对
+
+                # 每 update_every 帧执行一次 BC 梯度更新
+                if frame_count % cfg.update_every == 0:
+                    t0 = time.perf_counter()
+                    node_losses = []
+                    for nid in range(cfg.num_nodes):
+                        buf = bc_buf[nid]
+                        if not buf:
+                            continue
+                        ag  = agents[nid]
+                        opt = optimizers[nid]
+                        ag.net.train()
+
+                        total_loss = torch.zeros(1, device=device)
+                        for seq, target in buf:
+                            x = seq.unsqueeze(0).to(device)        # (1, T, d)
+                            probs_t, _, _, _, _ = ag.net(x, None, None)
+                            probs = probs_t[0]                     # (M,)
+                            total_loss = total_loss + F.mse_loss(probs, target.to(device))
+
+                        total_loss = total_loss / len(buf)
+                        opt.zero_grad()
+                        total_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(ag.net.parameters(), cfg.max_grad_norm)
+                        opt.step()
+                        node_losses.append(total_loss.item())
+                        bc_buf[nid].clear()
+
+                    update_count += 1
+                    elapsed = time.perf_counter() - t0
+                    if node_losses:
+                        avg_loss = float(np.mean(node_losses))
+                        print(
+                            f"[BC] frame={frame_count:5d}  update={update_count:4d}  "
+                            f"BC_loss={avg_loss:.4f}  ({elapsed*1000:.1f}ms)"
+                        )
+
+                # 定期保存检查点
+                if frame_count % cfg.save_every == 0:
+                    _save_agents(agents, str(save_dir / f"tdma_ppo_bc_frame{frame_count}.pt"))
+                    _save_agents(agents, str(save_dir / "tdma_ppo_latest.pt"))
+
+                if frame_count >= cfg.bc_frames:
+                    print(f"[BC] 达到目标帧数 {cfg.bc_frames}，预训练结束")
+                    break
+
+    except KeyboardInterrupt:
+        print(f"\n[BC] 收到中断，共训练 {frame_count} 帧，{update_count} 次更新。")
+    finally:
+        _save_agents(agents, str(save_dir / "tdma_ppo_bc_pretrained.pt"))
+        _save_agents(agents, str(save_dir / "tdma_ppo_latest.pt"))
+        print(f"[BC] BC 预训练权重已保存至 {save_dir}/tdma_ppo_bc_pretrained.pt")
+
+
+# ---------------------------------------------------------------------------
 # 训练主循环
 # ---------------------------------------------------------------------------
 
@@ -222,21 +422,29 @@ def train(cfg: PPOConfig):
     save_dir = Path(cfg.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    agent = TDMAAgent(
-        num_slots    = cfg.num_slots,
-        num_nodes    = cfg.num_nodes,
-        seq_len      = cfg.seq_len,
-        lstm1_hidden = cfg.lstm1_hidden,
-        lstm2_hidden = cfg.lstm2_hidden,
-        device       = cfg.device,
-    )
-    optimizer = optim.Adam(agent.net.parameters(), lr=cfg.lr)
-    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=cfg.lr_decay_gamma)
+    # ── 独立 Agent：每个节点维护独立网络、优化器、调度器、缓冲区 ─────────
+    agents:     Dict[int, TDMAAgent]           = {}
+    optimizers: Dict[int, optim.Optimizer]     = {}
+    schedulers: Dict[int, object]              = {}
+    buffers:    Dict[int, RolloutBuffer]       = {}
+    for nid in range(cfg.num_nodes):
+        ag  = TDMAAgent(
+            num_slots    = cfg.num_slots,
+            num_nodes    = cfg.num_nodes,
+            seq_len      = cfg.seq_len,
+            lstm1_hidden = cfg.lstm1_hidden,
+            lstm2_hidden = cfg.lstm2_hidden,
+            device       = cfg.device,
+        )
+        opt = optim.Adam(ag.net.parameters(), lr=cfg.lr)
+        sch = optim.lr_scheduler.ExponentialLR(opt, gamma=cfg.lr_decay_gamma)
+        agents[nid]     = ag
+        optimizers[nid] = opt
+        schedulers[nid] = sch
+        buffers[nid]    = RolloutBuffer()
 
     if cfg.load_ckpt:
-        agent.load(cfg.load_ckpt)
-        print(f"[PPO] 已加载权重：{cfg.load_ckpt}")
-    buffer    = RolloutBuffer()
+        _load_agents(agents, cfg.load_ckpt, device)
 
     # 动作回传管道（闭环训练）
     action_sender = ActionSender(
@@ -250,14 +458,18 @@ def train(cfg: PPOConfig):
     frame_count   = 0
     update_count  = 0
     episode_rewards: Dict[int, float] = collections.defaultdict(float)
-    _ent_coef_base: float = cfg.ent_coef     # 学习阶段 ent_coef（自适应基准）
-    # 若加载 checkpoint（低熵状态），预设 _last_entropy=0 → 第一次更新即用 ent_coef_high
-    # 若从零初始化（高熵状态），预设 _last_entropy=entropy_adapt_high → 第一次用 ent_coef_base
+    _ent_coef_base: float = cfg.ent_coef
+    # 加载 BC checkpoint 时不触发 ent_coef_high（BC policy 已有良好结构，高熵系数会破坏它）
+    # 加载 RL checkpoint 时假设低熵（防崩溃，触发 ent_coef_high）
+    # 从零初始化时从高熵开始（正常学习模式）
+    _bc_ckpt = cfg.load_ckpt and "bc" in cfg.load_ckpt.lower()
     _last_entropy: Optional[float] = (
-        0.0 if cfg.load_ckpt else cfg.entropy_adapt_high
+        cfg.entropy_adapt_high if (not cfg.load_ckpt or _bc_ckpt)
+        else 0.0
     )
 
     print(f"[PPO] 开始训练  num_slots={cfg.num_slots} num_nodes={cfg.num_nodes}")
+    print(f"[PPO] 独立 Agent 模式：每节点独立网络 × {cfg.num_nodes}")
     print(f"[PPO] update_every={cfg.update_every}  ppo_epochs={cfg.ppo_epochs}  lr={cfg.lr}")
     print(f"[PPO] 等待仿真连接 {cfg.pipe_path} ...")
 
@@ -265,44 +477,42 @@ def train(cfg: PPOConfig):
         with connect(
             num_nodes   = cfg.num_nodes,
             pipe_path   = cfg.pipe_path,
-            buffer_size = 32768,   # 足够容纳单次仿真的所有帧（20s × ~700帧/s × 9节点）
+            buffer_size = 32768,
         ) as frames:
             for frame_obs in frames:
                 frame_count += 1
                 t0 = time.perf_counter()
 
-                # ── 1. 推理：获取动作概率和状态价值 ──────────────────────────
-                agent.net.eval()
+                # ── 1. 推理：每节点使用自己的 Agent ──────────────────────
                 node_probs: Dict[int, np.ndarray] = {}
                 node_values: Dict[int, float]      = {}
 
                 for nid, obs in frame_obs.nodes.items():
-                    feat   = agent.extractor(obs)
-                    window = agent._windows.setdefault(
+                    ag = agents[nid]
+                    ag.net.eval()
+                    feat   = ag.extractor(obs)
+                    window = ag._windows.setdefault(
                         nid, collections.deque(maxlen=cfg.seq_len)
                     )
-                    actor_state  = agent._actor_states.get(nid)
-                    critic_state = agent._critic_states.get(nid)
+                    actor_state  = ag._actor_states.get(nid)
+                    critic_state = ag._critic_states.get(nid)
 
-                    # 构造序列（不修改 window，收集阶段手动管理）
                     pad = cfg.seq_len - len(window) - 1
                     pads = [torch.zeros_like(feat)] * max(pad, 0)
-                    seq_list = pads + list(window) + [feat]
-                    seq_list = seq_list[-cfg.seq_len:]          # 截取最后 T 帧
-                    feat_seq = torch.stack(seq_list, dim=0)     # (T, d)
+                    seq_list = (pads + list(window) + [feat])[-cfg.seq_len:]
+                    feat_seq = torch.stack(seq_list, dim=0)         # (T, d)
 
-                    x = feat_seq.unsqueeze(0).to(device)        # (1, T, d)
+                    x = feat_seq.unsqueeze(0).to(device)            # (1, T, d)
 
                     with torch.no_grad():
-                        probs_t, value_t, new_as, new_cs, _ = agent.net(
+                        probs_t, value_t, new_as, new_cs, _ = ag.net(
                             x, actor_state, critic_state
                         )
 
-                    # 持久化 LSTM-2 状态
-                    agent._actor_states[nid] = (
+                    ag._actor_states[nid] = (
                         new_as[0].detach(), new_as[1].detach()
                     )
-                    agent._critic_states[nid] = (
+                    ag._critic_states[nid] = (
                         new_cs[0].detach(), new_cs[1].detach()
                     )
                     window.append(feat)
@@ -310,18 +520,19 @@ def train(cfg: PPOConfig):
                     node_probs[nid]  = probs_t[0].cpu().numpy()
                     node_values[nid] = float(value_t[0].cpu())
 
-                # ── 2. 采样动作（因子化伯努利）─────────────────────────────
+                # ── 2. 采样动作（因子化伯努利）─────────────────────────
                 node_actions: Dict[int, np.ndarray] = {
-                    nid: agent.sample_action(p) for nid, p in node_probs.items()
+                    nid: agents[nid].sample_action(p)
+                    for nid, p in node_probs.items()
                 }
 
-                # ── 2.5 回传动作概率给 C++ 仿真（闭环）────────────────────
+                # ── 2.5 回传动作给 C++ 仿真（闭环）──────────────────────
                 action_sender.send(
                     frame=frame_obs.frame,
                     actions={nid: p.tolist() for nid, p in node_probs.items()},
                 )
 
-                # ── 3. 计算奖励 ───────────────────────────────────────────
+                # ── 3. 计算奖励 ──────────────────────────────────────
                 node_rewards: Dict[int, float] = {
                     nid: compute_reward(
                         obs,
@@ -331,14 +542,14 @@ def train(cfg: PPOConfig):
                     for nid, obs in frame_obs.nodes.items()
                 }
 
-                # ── 4. 存入经验缓冲 ───────────────────────────────────────
+                # ── 4. 存入各节点独立缓冲区 ──────────────────────────
                 for nid, obs in frame_obs.nodes.items():
                     if nid not in node_probs:
                         continue
+                    ag       = agents[nid]
                     probs_np = node_probs[nid]
                     act_np   = node_actions[nid]
 
-                    # log π(a|s)
                     probs_t  = torch.tensor(probs_np, dtype=torch.float32)
                     act_t    = torch.tensor(act_np,   dtype=torch.float32)
                     log_prob = (
@@ -346,13 +557,12 @@ def train(cfg: PPOConfig):
                         + (1 - act_t) * torch.log(1 - probs_t + 1e-8)
                     )
 
-                    # 重建 feat_seq（已在 window 中）
-                    window   = agent._windows[nid]
+                    window   = ag._windows[nid]
                     pad      = cfg.seq_len - len(window)
-                    pads     = [torch.zeros(agent.extractor.input_dim)] * pad
+                    pads     = [torch.zeros(ag.extractor.input_dim)] * pad
                     feat_seq = torch.stack(pads + list(window), dim=0)  # (T, d)
 
-                    buffer.add(nid, NodeTransition(
+                    buffers[nid].add(nid, NodeTransition(
                         feat_seq  = feat_seq,
                         action    = act_t,
                         log_prob  = log_prob,
@@ -361,9 +571,9 @@ def train(cfg: PPOConfig):
                     ))
                     episode_rewards[nid] += node_rewards[nid]
 
-                # ── 5. PPO 更新（每 update_every 帧）─────────────────────
+                # ── 5. PPO 更新（每 update_every 帧，各节点独立更新）───
                 if frame_count % cfg.update_every == 0:
-                    # 自适应 ent_coef：根据上次更新的熵值动态调整（防崩溃）
+                    # 自适应 ent_coef（基于上次平均熵，防止任意节点崩溃）
                     if (_last_entropy is not None
                             and cfg.ent_coef_high > _ent_coef_base
                             and cfg.entropy_adapt_high > cfg.entropy_adapt_low > 0):
@@ -372,24 +582,37 @@ def train(cfg: PPOConfig):
                         elif _last_entropy < cfg.entropy_adapt_high:
                             t = ((cfg.entropy_adapt_high - _last_entropy)
                                  / (cfg.entropy_adapt_high - cfg.entropy_adapt_low))
-                            cfg.ent_coef = _ent_coef_base + t * (cfg.ent_coef_high - _ent_coef_base)
+                            cfg.ent_coef = _ent_coef_base + t * (
+                                cfg.ent_coef_high - _ent_coef_base)
                         else:
                             cfg.ent_coef = _ent_coef_base
 
-                    buffer.compute_advantages(cfg.gamma, cfg.gae_lambda)
-                    losses = ppo_update(
-                        agent.net, optimizer, buffer, cfg, device
-                    )
-                    scheduler.step()
-                    buffer.clear()
+                    # 各节点独立 PPO 更新
+                    node_losses: Dict[int, Dict[str, float]] = {}
+                    for nid in range(cfg.num_nodes):
+                        if buffers[nid].size() == 0:
+                            continue
+                        buffers[nid].compute_advantages(cfg.gamma, cfg.gae_lambda)
+                        node_losses[nid] = ppo_update(
+                            agents[nid].net, optimizers[nid],
+                            buffers[nid], cfg, device
+                        )
+                        schedulers[nid].step()
+                        buffers[nid].clear()
+
                     update_count += 1
+                    # 聚合各节点损失（均值，用于日志和自适应 ent_coef）
+                    losses = {
+                        k: float(np.mean([node_losses[nid][k] for nid in node_losses]))
+                        for k in ['actor_loss', 'critic_loss', 'entropy']
+                    }
                     _last_entropy = losses['entropy']
 
-                    avg_r = np.mean(list(episode_rewards.values()))
+                    avg_r   = np.mean(list(episode_rewards.values()))
                     episode_rewards.clear()
 
                     elapsed = time.perf_counter() - t0
-                    cur_lr  = scheduler.get_last_lr()[0]
+                    cur_lr  = schedulers[0].get_last_lr()[0]
                     print(
                         f"[PPO] frame={frame_count:5d}  update={update_count:4d}  "
                         f"avg_r={avg_r:+.3f}  "
@@ -401,17 +624,16 @@ def train(cfg: PPOConfig):
                         f"({elapsed*1000:.1f}ms)"
                     )
 
-                # ── 6. 定期保存权重 ──────────────────────────────────────
+                # ── 6. 定期保存权重 ─────────────────────────────────
                 if frame_count % cfg.save_every == 0:
-                    ckpt = save_dir / f"tdma_ppo_frame{frame_count}.pt"
-                    agent.save(str(ckpt))
+                    _save_agents(agents, str(save_dir / f"tdma_ppo_frame{frame_count}.pt"))
+                    _save_agents(agents, str(save_dir / "tdma_ppo_latest.pt"))
 
     except KeyboardInterrupt:
         print(f"\n[PPO] 收到中断，共训练 {frame_count} 帧，{update_count} 次更新。")
     finally:
         action_sender.close()
-        last_ckpt = save_dir / "tdma_ppo_latest.pt"
-        agent.save(str(last_ckpt))
+        _save_agents(agents, str(save_dir / "tdma_ppo_latest.pt"))
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +679,10 @@ def _parse_args() -> PPOConfig:
                    help="RL 同步间隔帧数（0=异步，N=每N帧阻塞写确保动作必达，需与 omnetpp.ini rlSyncInterval 一致）")
     p.add_argument("--sync_timeout",  type=float, default=5.0,
                    help="同步写超时（秒），超时后继续训练不阻塞")
+    p.add_argument("--bc_frames",  type=int,   default=0,
+                   help="行为克隆预训练帧数（0=跳过BC，直接RL训练）")
+    p.add_argument("--bc_lr",      type=float, default=1e-3,
+                   help="BC 预训练阶段学习率（默认 1e-3，高于 RL 的 3e-4）")
     args = p.parse_args()
     cfg = PPOConfig()
     for k, v in vars(args).items():
@@ -465,4 +691,11 @@ def _parse_args() -> PPOConfig:
 
 
 if __name__ == "__main__":
-    train(_parse_args())
+    cfg = _parse_args()
+    if cfg.bc_frames > 0:
+        raise ValueError(
+            "--bc_frames 在 RL 乘数模式下不支持，请保持默认值 0。\n"
+            "见 bc_pretrain() 注释了解原因：BC 目标值 Pt1 在乘数模式下会放大申请概率，"
+            "导致 avg_r 暴跌。请直接运行 RL 训练（actor_head 零初始化已保证安全起步）。"
+        )
+    train(cfg)

@@ -122,19 +122,21 @@ python -m rl.ppo_trainer --num_slots 10 --num_nodes 9   # 第一步：先启 Pyt
 |:---|:---|:---|
 | `rl/rl_receiver.py` | `RLReceiver`, `connect()`, `ActionSender` | 管道读取与帧聚合；`connect()` 是上下文管理器，返回 `FrameObservation` 迭代器；`ActionSender` 负责动作写端 |
 | `rl/rl_agent.py` | `RLFeatureExtractor`, `LSTMActorCritic`, `TDMAAgent` | 特征提取与网络推理；`TDMAAgent` 为每个节点独立维护滑动窗口和 LSTM-2 隐状态 |
-| `rl/ppo_trainer.py` | `PPOConfig`, `RolloutBuffer`, `ppo_update()`, `train()` | PPO 训练主循环；`PPOConfig` 集中管理所有超参数 |
+| `rl/ppo_trainer.py` | `PPOConfig`, `RolloutBuffer`, `ppo_update()`, `bc_pretrain()`, `train()` | PPO 训练主循环；`bc_pretrain()` 为行为克隆预训练（不发送动作，Python 仅监听 C++ 启发式数据）；`PPOConfig` 集中管理所有超参数 |
 | `rl/transformer_model.py` | `_parse_bown()`, `_parse_t2hop()` | 被 `rl_agent.py` 复用用于解析时隙位图字符串 |
 
-**状态向量维度**：`4M + 10 + N`（M=numDataSlots, N=numNodes，默认 M=10, N=9 → 59 维）
-- Bown（M）+ T2hop（2M，occupied_flag + min_hop_norm）+ 10个标量 + Pt1（M）+ 节点ID one-hot（N）
+**状态向量维度**：`5M + 10 + N`（M=numDataSlots, N=numNodes，默认 M=10, N=9 → 69 维）
+- Bown（M）+ T2hop（2M，occupied_flag + min_hop_norm）+ 10个标量 + Pt1（M）+ HeurProb（M）+ 节点ID one-hot（N）
+- HeurProb：本帧 C++ 启发式申请概率向量，RL 乘数模式下作为乘数基准参考
 
 **网络架构**（LSTMActorCritic）：
 ```
-输入 (B, T, 4M+10+N)
+输入 (B, T, 5M+10+N)
     → LSTM-1 共享编码器 (hidden=128)
-    → Actor: LSTM-2a (hidden=64) → Linear(M) → Sigmoid → P_t ∈ (0,1)^M
+    → Actor: LSTM-2a (hidden=64) → Linear(M) → Sigmoid → α ∈ (0,1)^M（乘数模式）
     → Critic: LSTM-2c (hidden=64) → Linear(1) → V(t)
 ```
+Actor 输出层（actor_head）初始化为零权重：Sigmoid(0)=0.5 → 初始乘数=1.0，等效纯启发式。
 
 ### 网络拓扑（Network.ned）
 
@@ -154,7 +156,7 @@ python -m rl.ppo_trainer --num_slots 10 --num_nodes 9   # 第一步：先启 Pyt
 
 1. **on-policy 偏差**：C++ 仿真速度快于 Python，存在帧级延迟导致的 off-policy 风险（训练数据可能来自旧策略）。当前通过缩短 `update_every` 缓解。
 
-2. **RL 从零学习上限**：历史记录中 frame 0-4800 的 avg_r +82~+96 为 C++ **启发式策略**性能（ActionSender 延迟连接 Bug 导致 RL 在 frame 3072 才接管），并非 RL 学习成果。RL 从零学习的实际上限约为 +44~+52（与随机策略基线 +49 无显著差距）。根本原因：共享参数的 9 个节点策略同质化，无法从随机初始化中学出协调分工。自适应 ent_coef（0.05→0.10，entropy 阈值 0.55/0.45）已实现，可防止熵崩溃但不能提升基线。下一步：行为克隆预训练或独立 Agent 架构。
+2. **RL 乘数模式（已实施）**：历史实验中 RL 直接替换申请概率导致 `avoidSlotsNextSchedule` 退避机制失效，avg_r 仅 +44~+52（随机基线 +49）。**已于 2026-04-12 改为乘数模式**：C++ `scheduleRequests()` 始终计算 `heurProb`，RL 输出 α ∈ (0,1)，乘数 = 2α ∈ (0,2)，`reqProb = clamp(heurProb × 2α, 0, 1)`。α≈0.5 时等效纯启发式，退避机制完整保留。Actor 零初始化保证训练起点 avg_r ≥ +80。**BC 预训练已废弃**（`--bc_frames` 会抛 ValueError）：BC 目标 Pt1 在乘数模式下对应乘数 1.2~1.8，会放大申请概率，破坏退避机制，历史实验 avg_r 跌至 +13。**状态向量新增 HeurProb（M维）**：让 RL 感知每帧的启发式基准概率，便于学习更精确的乘数策略。
 
 3. **L_critic 归一化**：Critic 损失已归一化，正常量级为 1-10；若出现 300+ 说明奖励未归一化或网络发散。
 
@@ -167,8 +169,10 @@ python -m rl.ppo_trainer --num_slots 10 --num_nodes 9   # 第一步：先启 Pyt
 - `node_features_*/node_*/features.jsonl` — 离线 ML 训练用节点特征
 
 PPO 权重保存至 `checkpoints/`：
-- `tdma_ppo_frame<N>.pt` — 每 500 帧检查点
-- `tdma_ppo_latest.pt` — 最新权重
+- `tdma_ppo_frame<N>.pt` — 每 500 帧 RL 检查点
+- `tdma_ppo_bc_frame<N>.pt` — BC 预训练每 500 帧检查点
+- `tdma_ppo_bc_pretrained.pt` — BC 预训练完成后的最终权重（需 SIGINT 正常退出才保存）
+- `tdma_ppo_latest.pt` — 最新权重（RL 或 BC 均更新此文件）
 
 ## 语言说明
 

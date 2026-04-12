@@ -53,6 +53,8 @@ class NodeObservation:
         "Sharet", "Share_avgnbr", "Jlocal", "Envy",
         # 奖励信号
         "Nsucc", "Ncoll", "Pt1",
+        # RL 乘数模式：本帧启发式申请概率向量（乘数基准参考）
+        "HeurProb",
     )
 
     def __init__(self, raw: dict):
@@ -79,9 +81,10 @@ class NodeObservation:
         self.Envy         = f["Envy"]          # 机会差异 = Share_avgnbr - Sharet
 
         rs = raw.get("reward_signal", {})
-        self.Nsucc = rs.get("Nsucc", 0)        # 本帧成功传输时隙数
-        self.Ncoll = rs.get("Ncoll", 0)        # 本帧冲突时隙数
-        self.Pt1   = rs.get("Pt1", [])         # 上一帧申请概率向量 (M维)
+        self.Nsucc    = rs.get("Nsucc", 0)        # 本帧成功传输时隙数
+        self.Ncoll    = rs.get("Ncoll", 0)        # 本帧冲突时隙数
+        self.Pt1      = rs.get("Pt1", [])         # 上一帧申请概率向量 (M维)
+        self.HeurProb = rs.get("HeurProb", [])    # 本帧启发式申请概率向量（乘数基准）
 
     def to_vector(self) -> List[float]:
         """将数值特征展平为 RL 状态向量（Bown 逐位展开，其余数值依次追加）。"""

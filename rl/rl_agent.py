@@ -49,8 +49,8 @@ class RLFeatureExtractor:
     将 NodeObservation 转换为 RL 状态向量。
 
     复用 transformer_model 中的 _parse_bown / _parse_t2hop 解析函数，
-    追加向量 Pt1（上一帧申请概率）以构成完整状态。
-    输入维度 = M + 2M + 10 + M + N = 4M + 10 + N（N 为 numNodes）
+    追加向量 Pt1（上一帧申请概率）和 HeurProb（本帧启发式基准）以构成完整状态。
+    输入维度 = M + 2M + 10 + M + M + N = 5M + 10 + N（N 为 numNodes）
     """
 
     # 标量数值特征（与文档 6.2.1 节对齐）
@@ -65,7 +65,7 @@ class RLFeatureExtractor:
 
     @property
     def input_dim(self) -> int:
-        return 4 * self.num_slots + 10 + self.num_nodes
+        return 5 * self.num_slots + 10 + self.num_nodes  # 新增 HeurProb (M维)
 
     def __call__(self, obs: NodeObservation) -> torch.Tensor:
         # 1) Bown：M 位
@@ -83,13 +83,19 @@ class RLFeatureExtractor:
             pt1 += [0.0] * (self.num_slots - len(pt1))
         pt1 = pt1[: self.num_slots]
 
-        # 5) 节点 ID one-hot 编码：num_nodes 维，使各节点能学习差异化策略
+        # 5) HeurProb：本帧启发式申请概率向量，M 维（RL 乘数模式的基准参考）
+        heur = list(obs.HeurProb) if obs.HeurProb else []
+        if len(heur) < self.num_slots:
+            heur += [0.0] * (self.num_slots - len(heur))
+        heur = heur[: self.num_slots]
+
+        # 6) 节点 ID one-hot 编码：num_nodes 维，使各节点能学习差异化策略
         node_onehot = [0.0] * self.num_nodes
         nid = int(obs.node_id)
         if 0 <= nid < self.num_nodes:
             node_onehot[nid] = 1.0
 
-        return torch.tensor(bown + t2hop + numeric + pt1 + node_onehot, dtype=torch.float32)
+        return torch.tensor(bown + t2hop + numeric + pt1 + heur + node_onehot, dtype=torch.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +136,9 @@ class LSTMActorCritic(nn.Module):
         # Actor：策略记忆层（LSTM-2a）+ 全连接输出头
         self.actor_lstm = nn.LSTM(lstm1_hidden, lstm2_hidden, batch_first=True)
         self.actor_head  = nn.Linear(lstm2_hidden, num_slots)
+        # 乘数模式：零初始化确保 Sigmoid(0)=0.5，初始乘数精确为 1.0（等效纯启发式）
+        nn.init.zeros_(self.actor_head.weight)
+        nn.init.zeros_(self.actor_head.bias)
 
         # Critic：价值记忆层（LSTM-2c）+ 全连接状态价值估计头
         self.critic_lstm = nn.LSTM(lstm1_hidden, lstm2_hidden, batch_first=True)
