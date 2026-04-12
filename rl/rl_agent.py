@@ -104,92 +104,79 @@ class RLFeatureExtractor:
 
 class LSTMActorCritic(nn.Module):
     """
-    层级 LSTM Actor-Critic 网络（文档 6.3 节）。
+    轻量 LSTM Actor-Critic 网络。
+
+    LSTM-1 共享编码器直接接 Actor/Critic 线性头，无 LSTM-2。
+    参数量 ~5K（相比旧版 ~192K），适合小样本在线学习。
 
     Parameters
     ----------
     input_dim : int
-        单帧特征维度（= 4M + 10）
+        单帧特征维度（= 5M + 10 + N）
     num_slots : int
         业务时隙数 M（动作空间维度）
     lstm1_hidden : int
-        LSTM-1 共享编码器隐状态维度（默认 128）
-    lstm2_hidden : int
-        Actor LSTM-2 策略记忆层隐状态维度（默认 64）
+        LSTM-1 共享编码器隐状态维度（默认 32）
     """
 
     def __init__(
         self,
         input_dim: int,
         num_slots: int,
-        lstm1_hidden: int = 128,
-        lstm2_hidden: int = 64,
+        lstm1_hidden: int = 32,
     ):
         super().__init__()
         self.num_slots    = num_slots
         self.lstm1_hidden = lstm1_hidden
-        self.lstm2_hidden = lstm2_hidden
 
         # 共享时序特征提取器（LSTM-1）
         self.lstm1 = nn.LSTM(input_dim, lstm1_hidden, batch_first=True)
 
-        # Actor：策略记忆层（LSTM-2a）+ 全连接输出头
-        self.actor_lstm = nn.LSTM(lstm1_hidden, lstm2_hidden, batch_first=True)
-        self.actor_head  = nn.Linear(lstm2_hidden, num_slots)
+        # Actor：直接从 LSTM-1 输出接线性头
+        self.actor_head = nn.Linear(lstm1_hidden, num_slots)
         # 乘数模式：零初始化确保 Sigmoid(0)=0.5，初始乘数精确为 1.0（等效纯启发式）
         nn.init.zeros_(self.actor_head.weight)
         nn.init.zeros_(self.actor_head.bias)
 
-        # Critic：价值记忆层（LSTM-2c）+ 全连接状态价值估计头
-        self.critic_lstm = nn.LSTM(lstm1_hidden, lstm2_hidden, batch_first=True)
-        self.critic_head = nn.Linear(lstm2_hidden, 1)
+        # Critic：直接从 LSTM-1 输出接线性头
+        self.critic_head = nn.Linear(lstm1_hidden, 1)
 
     def forward(
         self,
         x: torch.Tensor,
-        actor_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        critic_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        lstm1_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[
         torch.Tensor,
         torch.Tensor,
-        Tuple[torch.Tensor, torch.Tensor],
-        Tuple[torch.Tensor, torch.Tensor],
         Tuple[torch.Tensor, torch.Tensor],
     ]:
         """
         Parameters
         ----------
-        x            : (B, T, input_dim)  T 帧观测序列
-        actor_state  : Actor LSTM-2a 的 (h, c)，帧间持久传递
-        critic_state : Critic LSTM-2c 的 (h, c)，帧间持久传递
-        lstm1_state  : LSTM-1 的 (h, c)，通常每次置 None（序列重新编码）
+        x      : (B, T, input_dim)  T 帧观测序列
+        hidden : LSTM-1 的 (h, c)，帧间持久传递
 
         Returns
         -------
-        probs             : (B, M)   每个时隙的申请概率 P_t = σ(Wpol·h2t + bpol)
-        value             : (B,)     状态价值估计 V(t)
-        new_actor_state   : Actor LSTM-2a 的新 (h, c)
-        new_critic_state  : Critic LSTM-2c 的新 (h, c)
-        new_lstm1_state   : LSTM-1 的新 (h, c)
+        probs      : (B, M)   每个时隙的乘数 α = σ(W·h + b)
+        value      : (B,)     状态价值估计 V(t)
+        new_hidden : LSTM-1 的新 (h, c)
         """
         # LSTM-1：提取时序特征，取序列最后时刻隐状态
-        feat, new_lstm1_state = self.lstm1(x, lstm1_state)      # (B, T, lstm1_hidden)
-        F_t = feat[:, -1:, :]                                   # (B, 1, lstm1_hidden)
+        feat, new_hidden = self.lstm1(x, hidden)        # (B, T, lstm1_hidden)
+        F_t = feat[:, -1, :]                            # (B, lstm1_hidden)
 
-        # Actor LSTM-2a：持续策略记忆，h2 跨帧传递
-        actor_out, new_actor_state = self.actor_lstm(F_t, actor_state)    # (B, 1, lstm2_hidden)
-        probs = torch.sigmoid(self.actor_head(actor_out[:, 0, :]))        # (B, M)
+        # Actor：直接输出乘数 α
+        probs = torch.sigmoid(self.actor_head(F_t))     # (B, M)
 
-        # Critic LSTM-2c：持续价值记忆，跨帧传递
-        critic_out, new_critic_state = self.critic_lstm(F_t, critic_state)  # (B, 1, lstm2_hidden)
-        value = self.critic_head(critic_out[:, 0, :]).squeeze(-1)           # (B,)
+        # Critic：状态价值估计
+        value = self.critic_head(F_t).squeeze(-1)       # (B,)
 
-        return probs, value, new_actor_state, new_critic_state, new_lstm1_state
+        return probs, value, new_hidden
 
 
 # ---------------------------------------------------------------------------
-# Agent：管理多节点的推理状态（滑动窗口 + LSTM-2 隐状态）
+# Agent：管理多节点的推理状态（滑动窗口 + LSTM 隐状态）
 # ---------------------------------------------------------------------------
 
 class TDMAAgent:
@@ -198,14 +185,13 @@ class TDMAAgent:
 
     每个节点独立维护：
       - 长度 T 的观测滑动窗口（不足 T 帧时用零填充）
-      - LSTM-2 隐状态（帧间持久，体现策略记忆）
+      - LSTM-1 隐状态（帧间持久传递）
 
     Parameters
     ----------
     num_slots    : int    业务时隙数 M
     seq_len      : int    滑动窗口长度 T（默认 10）
     lstm1_hidden : int    LSTM-1 隐状态维度
-    lstm2_hidden : int    LSTM-2 隐状态维度
     device       : str    推理设备（'cpu' / 'cuda'）
     """
 
@@ -214,8 +200,7 @@ class TDMAAgent:
         num_slots: int,
         num_nodes: int = 1,
         seq_len: int = 10,
-        lstm1_hidden: int = 128,
-        lstm2_hidden: int = 64,
+        lstm1_hidden: int = 32,
         device: str = "cpu",
     ):
         self.num_slots = num_slots
@@ -227,13 +212,11 @@ class TDMAAgent:
             input_dim    = self.extractor.input_dim,
             num_slots    = num_slots,
             lstm1_hidden = lstm1_hidden,
-            lstm2_hidden = lstm2_hidden,
         ).to(self.device)
 
         # 每个节点的推理状态
-        self._windows: Dict[int, collections.deque] = {}        # node_id -> deque(feat_tensor)
-        self._actor_states: Dict[int, Optional[Tuple]] = {}     # node_id -> Actor LSTM-2a (h, c)
-        self._critic_states: Dict[int, Optional[Tuple]] = {}    # node_id -> Critic LSTM-2c (h, c)
+        self._windows: Dict[int, collections.deque] = {}            # node_id -> deque(feat_tensor)
+        self._hidden_states: Dict[int, Optional[Tuple]] = {}        # node_id -> LSTM-1 (h, c)
 
     # ------------------------------------------------------------------
     # 推理接口
@@ -291,14 +274,12 @@ class TDMAAgent:
     def reset_node(self, node_id: int):
         """重置单个节点的推理状态（节点重启或 episode 边界时调用）。"""
         self._windows.pop(node_id, None)
-        self._actor_states.pop(node_id, None)
-        self._critic_states.pop(node_id, None)
+        self._hidden_states.pop(node_id, None)
 
     def reset_all(self):
         """重置所有节点状态。"""
         self._windows.clear()
-        self._actor_states.clear()
-        self._critic_states.clear()
+        self._hidden_states.clear()
 
     # ------------------------------------------------------------------
     # 权重持久化
@@ -326,18 +307,16 @@ class TDMAAgent:
     def _forward_node(
         self, obs: NodeObservation
     ) -> Tuple[np.ndarray, float]:
-        """单节点前向推理，更新滑动窗口和 LSTM-2 状态。"""
+        """单节点前向推理，更新滑动窗口和 LSTM 隐状态。"""
         feat = self.extractor(obs)
 
         # 初始化节点状态（首次出现）
         if obs.node_id not in self._windows:
             self._windows[obs.node_id]        = collections.deque(maxlen=self.seq_len)
-            self._actor_states[obs.node_id]   = None
-            self._critic_states[obs.node_id]  = None
+            self._hidden_states[obs.node_id]  = None
 
-        window        = self._windows[obs.node_id]
-        actor_state   = self._actor_states[obs.node_id]
-        critic_state  = self._critic_states[obs.node_id]
+        window = self._windows[obs.node_id]
+        hidden = self._hidden_states[obs.node_id]
 
         # 构造序列张量：不足 T 帧时用零填充头部
         window.append(feat)
@@ -345,18 +324,12 @@ class TDMAAgent:
         pads = [torch.zeros_like(feat)] * pad_len
         x = torch.stack(pads + list(window), dim=0).unsqueeze(0).to(self.device)  # (1, T, d)
 
-        probs, value, new_actor_state, new_critic_state, _ = self.net(
-            x, actor_state, critic_state
-        )
+        probs, value, new_hidden = self.net(x, hidden)
 
-        # 持久化 LSTM-2 状态（分离梯度，防止跨 episode 累积计算图）
-        self._actor_states[obs.node_id] = (
-            new_actor_state[0].detach(),
-            new_actor_state[1].detach(),
-        )
-        self._critic_states[obs.node_id] = (
-            new_critic_state[0].detach(),
-            new_critic_state[1].detach(),
+        # 持久化 LSTM 隐状态（分离梯度，防止跨 episode 累积计算图）
+        self._hidden_states[obs.node_id] = (
+            new_hidden[0].detach(),
+            new_hidden[1].detach(),
         )
 
         return probs[0].cpu().numpy(), float(value[0].cpu())
@@ -403,21 +376,20 @@ if __name__ == "__main__":
     B   = 4   # batch size
 
     extractor = RLFeatureExtractor(num_slots=M, num_nodes=N)
-    print(f"特征维度 = {extractor.input_dim}  (期望 4×{M}+10+{N} = {4*M+10+N})")
+    print(f"特征维度 = {extractor.input_dim}  (期望 5×{M}+10+{N} = {5*M+10+N})")
 
     net = LSTMActorCritic(input_dim=extractor.input_dim, num_slots=M)
     print(f"网络参数量 = {sum(p.numel() for p in net.parameters()):,}")
 
     # 随机输入前向测试
     x = torch.randn(B, T, extractor.input_dim)
-    probs, value, actor_state, critic_state, _ = net(x)
+    probs, value, hidden = net(x)
     print(f"probs.shape  = {probs.shape}   (期望 [{B}, {M}])")
     print(f"value.shape  = {value.shape}   (期望 [{B}])")
     print(f"probs range  = [{probs.min():.3f}, {probs.max():.3f}]  (应在 (0,1) 内)")
 
-    # LSTM-2 状态持久化测试（模拟两帧）
-    _, _, as1, cs1, _ = net(x)
-    _, _, as2, cs2, _ = net(x, actor_state=as1, critic_state=cs1)
-    print(f"Actor  LSTM-2a 帧间传递正常: h.shape={as2[0].shape}")
-    print(f"Critic LSTM-2c 帧间传递正常: h.shape={cs2[0].shape}")
+    # LSTM 隐状态持久化测试（模拟两帧）
+    _, _, h1 = net(x)
+    _, _, h2 = net(x, hidden=h1)
+    print(f"LSTM-1 帧间传递正常: h.shape={h2[0].shape}")
     print("所有维度验证通过。")

@@ -46,8 +46,7 @@ class PPOConfig:
     num_slots:    int   = 10
     num_nodes:    int   = 5
     seq_len:      int   = 10
-    lstm1_hidden: int   = 128
-    lstm2_hidden: int   = 64
+    lstm1_hidden: int   = 32
 
     # PPO 超参数
     lr:           float = 3e-4
@@ -62,7 +61,7 @@ class PPOConfig:
     max_grad_norm: float = 0.5     # 梯度裁剪
 
     # 训练节奏
-    update_every: int   = 32       # 每 K 帧执行一次 PPO 更新
+    update_every: int   = 128      # 每 K 帧执行一次 PPO 更新
     ppo_epochs:   int   = 4        # 每次更新的梯度步数
     save_every:   int   = 500      # 每 N 帧保存一次权重
     lr_decay_gamma: float = 0.9995 # 指数衰减：每次 PPO 更新后 lr *= lr_decay_gamma
@@ -182,8 +181,8 @@ def ppo_update(
     stats = collections.defaultdict(list)
 
     for _ in range(cfg.ppo_epochs):
-        # 前向（不带 LSTM-2 持久状态，梯度更新时重置）
-        probs, values, _, _, _ = net(feat_seqs)     # (N, M), (N,)
+        # 前向（不带持久隐状态，梯度更新时重置）
+        probs, values, _ = net(feat_seqs)           # (N, M), (N,)
 
         # log π(a|s)：M 个独立伯努利分布
         dist = torch.distributions.Bernoulli(probs=probs)
@@ -299,7 +298,6 @@ def bc_pretrain(cfg: PPOConfig):
             seq_len      = cfg.seq_len,
             device       = str(device),
             lstm1_hidden = cfg.lstm1_hidden,
-            lstm2_hidden = cfg.lstm2_hidden,
         )
         ag.net.to(device)
         optimizers[nid] = optim.Adam(ag.net.parameters(), lr=cfg.bc_lr)
@@ -433,7 +431,6 @@ def train(cfg: PPOConfig):
             num_nodes    = cfg.num_nodes,
             seq_len      = cfg.seq_len,
             lstm1_hidden = cfg.lstm1_hidden,
-            lstm2_hidden = cfg.lstm2_hidden,
             device       = cfg.device,
         )
         opt = optim.Adam(ag.net.parameters(), lr=cfg.lr)
@@ -458,6 +455,12 @@ def train(cfg: PPOConfig):
     frame_count   = 0
     update_count  = 0
     episode_rewards: Dict[int, float] = collections.defaultdict(float)
+    # 奖励重塑：每节点 EWMA 基线，差分奖励减小方差
+    reward_baselines: Dict[int, float] = collections.defaultdict(float)
+    _ewma_alpha = 0.05  # EWMA 更新步长（对应衰减 0.95）
+    # 奖励延迟对齐：帧 t 的奖励（Nsucc/Ncoll）反映帧 t-1 的 RL 动作结果
+    # 因此帧 t 的 transition 需等帧 t+1 的奖励来完成
+    pending_transitions: Dict[int, NodeTransition] = {}
     _ent_coef_base: float = cfg.ent_coef
     # 加载 BC checkpoint 时不触发 ent_coef_high（BC policy 已有良好结构，高熵系数会破坏它）
     # 加载 RL checkpoint 时假设低熵（防崩溃，触发 ent_coef_high）
@@ -494,8 +497,7 @@ def train(cfg: PPOConfig):
                     window = ag._windows.setdefault(
                         nid, collections.deque(maxlen=cfg.seq_len)
                     )
-                    actor_state  = ag._actor_states.get(nid)
-                    critic_state = ag._critic_states.get(nid)
+                    hidden = ag._hidden_states.get(nid)
 
                     pad = cfg.seq_len - len(window) - 1
                     pads = [torch.zeros_like(feat)] * max(pad, 0)
@@ -505,15 +507,10 @@ def train(cfg: PPOConfig):
                     x = feat_seq.unsqueeze(0).to(device)            # (1, T, d)
 
                     with torch.no_grad():
-                        probs_t, value_t, new_as, new_cs, _ = ag.net(
-                            x, actor_state, critic_state
-                        )
+                        probs_t, value_t, new_hidden = ag.net(x, hidden)
 
-                    ag._actor_states[nid] = (
-                        new_as[0].detach(), new_as[1].detach()
-                    )
-                    ag._critic_states[nid] = (
-                        new_cs[0].detach(), new_cs[1].detach()
+                    ag._hidden_states[nid] = (
+                        new_hidden[0].detach(), new_hidden[1].detach()
                     )
                     window.append(feat)
 
@@ -527,12 +524,15 @@ def train(cfg: PPOConfig):
                 }
 
                 # ── 2.5 回传动作给 C++ 仿真（闭环）──────────────────────
+                # 关键：发送二值采样动作（非连续α），让环境反馈依赖于实际动作
+                # C++ 乘数模式：action=1 → α=1.0 → 乘数=2.0 → 强烈申请
+                #              action=0 → α=0.0 → 乘数=0.0 → 不申请
                 action_sender.send(
                     frame=frame_obs.frame,
-                    actions={nid: p.tolist() for nid, p in node_probs.items()},
+                    actions={nid: a.tolist() for nid, a in node_actions.items()},
                 )
 
-                # ── 3. 计算奖励 ──────────────────────────────────────
+                # ── 3. 计算奖励（本帧 Nsucc/Ncoll 是上一帧动作的结果）──
                 node_rewards: Dict[int, float] = {
                     nid: compute_reward(
                         obs,
@@ -542,7 +542,22 @@ def train(cfg: PPOConfig):
                     for nid, obs in frame_obs.nodes.items()
                 }
 
-                # ── 4. 存入各节点独立缓冲区 ──────────────────────────
+                # ── 4a. 用本帧奖励完成上一帧的 pending transition ────
+                # 帧 t 的 Nsucc/Ncoll 反映帧 t-1 的 RL 动作结果
+                # 因此帧 t 的奖励应配对给帧 t-1 的动作
+                for nid in list(pending_transitions.keys()):
+                    if nid in node_rewards:
+                        raw_r = node_rewards[nid]
+                        baseline = reward_baselines[nid]
+                        reward_baselines[nid] = baseline + _ewma_alpha * (raw_r - baseline)
+                        shaped_r = raw_r - baseline
+
+                        pt = pending_transitions.pop(nid)
+                        pt.reward = shaped_r
+                        buffers[nid].add(nid, pt)
+                        episode_rewards[nid] += raw_r
+
+                # ── 4b. 为本帧创建 pending transition（等下一帧奖励）──
                 for nid, obs in frame_obs.nodes.items():
                     if nid not in node_probs:
                         continue
@@ -562,14 +577,13 @@ def train(cfg: PPOConfig):
                     pads     = [torch.zeros(ag.extractor.input_dim)] * pad
                     feat_seq = torch.stack(pads + list(window), dim=0)  # (T, d)
 
-                    buffers[nid].add(nid, NodeTransition(
+                    pending_transitions[nid] = NodeTransition(
                         feat_seq  = feat_seq,
                         action    = act_t,
                         log_prob  = log_prob,
                         value     = node_values[nid],
-                        reward    = node_rewards[nid],
-                    ))
-                    episode_rewards[nid] += node_rewards[nid]
+                        reward    = 0.0,   # 占位，下一帧填充
+                    )
 
                 # ── 5. PPO 更新（每 update_every 帧，各节点独立更新）───
                 if frame_count % cfg.update_every == 0:
@@ -661,10 +675,9 @@ def _parse_args() -> PPOConfig:
     p.add_argument("--r_alpha",       type=float, default=1.0)
     p.add_argument("--r_gamma",       type=float, default=0.3)
     p.add_argument("--r_delta",       type=float, default=0.2)
-    p.add_argument("--lstm1_hidden",  type=int,   default=128)
-    p.add_argument("--lstm2_hidden",  type=int,   default=64)
+    p.add_argument("--lstm1_hidden",  type=int,   default=32)
     p.add_argument("--max_grad_norm", type=float, default=0.5)
-    p.add_argument("--update_every",     type=int,   default=32)
+    p.add_argument("--update_every",     type=int,   default=128)
     p.add_argument("--ppo_epochs",       type=int,   default=4)
     p.add_argument("--lr_decay_gamma",   type=float, default=0.9995,
                    help="指数 LR 衰减：每次 PPO 更新后 lr *= lr_decay_gamma（1.0=不衰减）")
