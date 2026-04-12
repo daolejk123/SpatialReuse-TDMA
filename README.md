@@ -8,8 +8,9 @@
 - **空间复用**：利用两跳邻居信息，允许互不干扰的节点复用同一时隙，提升频谱利用率
 - **多优先级 QoS**：低 / 高 / 关键三级业务优先级队列
 - **多种流量模型**：泊松分布、阶梯式递增、自适应流量生成
-- **在线 RL 接口**：仿真通过命名管道实时推送节点特征与奖励信号，LSTM Actor-Critic Agent 在线决策
+- **RL 乘数模式**：LSTM Actor-Critic 输出乘数调整启发式策略，保留退避机制，独立 Agent 在线学习
 - **公平性分析**：自动输出公平性指数、逐帧性能指标等统计数据
+- **Docker 支持**：一键构建完整环境，无需手动安装 OMNeT++
 
 ## 依赖
 
@@ -18,27 +19,40 @@
 | [OMNeT++](https://omnetpp.org/) | 6.3+ |
 | C++ 编译器 | C++17 |
 | Python | 3.8+（torch、numpy） |
+| Docker（可选） | 20.10+ |
+
+> 详细安装步骤见 [INSTALL.md](INSTALL.md)（支持 Docker 和 WSL 手动安装两种方式）
 
 ## 快速开始
 
+### Docker（推荐）
+
 ```bash
-# 激活 OMNeT++ 环境（含 Python venv）
-source /home/opp_env/omnetpp-6.3.0/setenv
+git clone https://github.com/daolejk123/SpatialReuse-TDMA.git
+cd SpatialReuse-TDMA
 
-# 编译仿真
-make
-
-# GUI 模式
-./DynamicTDMA -f omnetpp.ini
-
-# 命令行批量仿真
-./DynamicTDMA -f omnetpp.ini -u Cmdenv
+docker build -t dynamic-tdma .
+docker run -it --rm \
+  -v $(pwd)/checkpoints:/app/checkpoints \
+  -v $(pwd)/logs:/app/logs \
+  dynamic-tdma \
+  bash -c 'source /opt/omnetpp-6.3.0/setenv -f && \
+           ./scripts/run_joint.sh --num_slots 10 --num_nodes 9'
 ```
 
-如需重新生成 Makefile（修改 `.ned` 或 `.msg` 文件后）：
+### 本地环境
 
 ```bash
-opp_makemake -f --deep -O out -I.
+source /opt/omnetpp-6.3.0/setenv -f
+
+# 编译
+make
+
+# 一键启动 RL 训练
+./scripts/run_joint.sh --num_slots 10 --num_nodes 9
+
+# GUI 模式（调试用）
+./DynamicTDMA -f omnetpp.ini
 ```
 
 ## 项目结构
@@ -84,7 +98,7 @@ opp_makemake -f --deep -O out -I.
 }
 ```
 
-**状态向量维度**（M 个数据时隙，N 个节点）：`Bown(M) + T2hop(2M) + 数值特征(10) + Pt1(M) + NodeID_onehot(N) = 4M+10+N`（默认 59 维）
+**状态向量维度**（M 个数据时隙，N 个节点）：`Bown(M) + T2hop(2M) + 标量(10) + Pt1(M) + HeurProb(M) + NodeID_onehot(N) = 5M+10+N`（默认 M=10, N=9 → 69 维）
 
 ## 训练流程
 
@@ -104,19 +118,16 @@ python -m rl.ppo_trainer --num_slots 10 --num_nodes 9  # 第一步
 
 训练日志示例：
 ```
-[PPO] frame=   32  update=   1  avg_r=+44.367  L_actor=-0.0052  L_critic=3.3985  entropy=0.6928
+[PPO] frame=  128  update=   1  avg_r=+175.082  L_actor=-0.0013  L_critic=1.0000  entropy=0.6931
+[PPO] frame=  256  update=   2  avg_r=+178.088  L_actor=-0.0005  L_critic=1.0179  entropy=0.6931
 ```
 
-权重自动保存至 `checkpoints/tdma_ppo_latest.pt`，每 500 帧一个检查点。
+`avg_r` 为 128 帧累积值，每帧约 +1.4 为启发式基线。权重自动保存至 `checkpoints/tdma_ppo_latest.pt`，每 500 帧一个检查点。
 
 ### 断点续训
 
-支持加载已有权重继续训练：
-
 ```bash
-./scripts/run_joint.sh --num_slots 10 --num_nodes 9 --load_ckpt checkpoints/tdma_ppo_frame7000.pt
-# 或手动
-python -m rl.ppo_trainer --num_slots 10 --num_nodes 9 --load_ckpt checkpoints/tdma_ppo_frame7000.pt
+./scripts/run_joint.sh --num_slots 10 --num_nodes 9 --load_ckpt checkpoints/tdma_ppo_latest.pt
 ```
 
 ## 端到端验证
@@ -172,20 +183,19 @@ python -m rl.ppo_trainer --num_slots 10 --num_nodes 9
 
 ```
 [PPO] 开始训练  num_slots=10 num_nodes=9
-[PPO] update_every=32  ppo_epochs=4  lr=0.0003
+[PPO] 独立 Agent 模式：每节点独立网络 × 9
+[PPO] update_every=128  ppo_epochs=4  lr=0.0003
 [PPO] 等待仿真连接 /tmp/tdma_rl_state ...
 [RLReceiver] C++ 仿真已连接，开始接收特征 ...
-[PPO] frame=   32  update=   1  avg_r=+44.367  L_actor=-0.0052  L_critic=3.3985  entropy=0.6928  (99.2ms)
-[TDMAAgent] 权重已保存至 checkpoints/tdma_ppo_frame50.pt
-[PPO] frame=   64  update=   2  avg_r=+44.859  L_actor=+0.0021  L_critic=3.5749  entropy=0.6927  (82.1ms)
-[PPO] frame=   96  update=   3  avg_r=+44.558  L_actor=-0.0021  L_critic=3.6866  entropy=0.6925  (88.0ms)
+[PPO] frame=  128  update=   1  avg_r=+175.082  L_actor=-0.0013  L_critic=1.0000  entropy=0.6931  (121.5ms)
+[PPO] frame=  256  update=   2  avg_r=+178.088  L_actor=-0.0005  L_critic=1.0179  entropy=0.6931  (102.3ms)
 ...
 ```
 
 **验证要点**：
-- 每 32 帧触发一次 PPO 梯度更新
-- `avg_r` 平均奖励为正值（~44），表明节点成功获取时隙
-- `L_actor` / `L_critic` 损失有变化，表明网络在学习
+- 每 128 帧触发一次 PPO 梯度更新
+- `avg_r` 为 128 帧累积值（每帧约 +1.4 为启发式基线水平）
+- `L_critic` 应逐步下降（表明 Critic 在学习价值估计）
 - `entropy` 接近 ln(2)≈0.693，策略尚未收敛（符合训练初期预期）
 - checkpoint 文件按设定间隔保存到 `checkpoints/` 目录
 
@@ -216,27 +226,24 @@ ls -lh checkpoints/
 ## 网络架构
 
 ```
-观测序列 Ot = [o_{t-9}, ..., o_t]   shape: (T=10, 4M+10+N)
+观测序列 Ot = [o_{t-9}, ..., o_t]   shape: (T=10, 5M+10+N)
          │
          ▼
   ┌─────────────┐
-  │   LSTM-1    │  共享时序编码器（hidden=128）
+  │   LSTM-1    │  时序编码器（hidden=32）
   └──────┬──────┘
-         │ F't (128维)
+         │ F_t (32维)
    ┌─────┴─────┐
    ▼           ▼
 ┌───────┐   ┌───────┐
-│LSTM-2a│   │LSTM-2c│
-│hidden │   │hidden │
-│  =64  │   │  =64  │
 │FC+Sig │   │FC → 1 │
 └───────┘   └───────┘
- P_t ∈ (0,1)^M       V(t) 标量
+ α ∈ (0,1)^M        V(t) 标量
  Actor               Critic
- 每时隙申请概率       状态价值估计
+ 乘数因子             状态价值估计
 ```
 
-Actor 和 Critic 各自拥有独立的 LSTM-2 层，隐状态跨帧持久传递，分别形成策略记忆和价值记忆。总参数量约 192K。
+轻量架构（~13.5K 参数），LSTM-1 直接接 Actor/Critic 线性头。Actor 零初始化保证 α=0.5 → 乘数=1.0（等效纯启发式起点）。每个节点维护独立的网络实例。
 
 ## 奖励函数
 
@@ -271,28 +278,26 @@ r_t = α·Nsucc - β·Ncoll + γ·Jlocal - δ·Wt
                                        下一帧更新 P_t
 ```
 
-## 本周改进（2026-03-23 ~ 2026-03-29）
+## 改进历史
 
-### 1. RL 闭环训练实现
-- **动作回传管道**：Python 端通过 `/tmp/tdma_rl_action` 将 RL Agent 的动作概率 P_t 实时回传给 C++
-- C++ 端优先使用 RL 动作，未连接时自动回退到启发式策略
+### 2026-04-12：网络瘦身 + 训练架构修复
 
-### 2. PPO 奖励崩溃修复
-- **节点 ID 嵌入**：状态向量中加入 one-hot 节点 ID，使各节点能学习差异化策略
-- **GAE(λ=0.95)**：替代简单 TD 计算 advantage，减小方差
-- **熵正则化调整**：增大探索强度，避免过早收敛
-- **效果**：奖励崩溃从 frame 1920 延至 frame 4800（延长 3 倍），前 4800 帧 avg_r 维持 +82~+96
+- **RL 乘数模式**：C++ 始终计算启发式概率，RL 输出乘数因子调整，保留退避机制
+- **网络瘦身**：去掉 LSTM-2，hidden 128→32，参数量 192K→13.5K
+- **独立 Agent**：每节点独立网络、优化器、缓冲区，适配局部观测约束
+- **二值动作回传**：修复动作-环境断开（原代码发连续 α 导致环境恒定）
+- **奖励延迟对齐**：`pending_transitions` 确保因果时序正确
+- **EWMA 差分奖励**：减小奖励方差，突出改进信号
 
-### 3. 训练稳定性改进
-- **ActionSender 延迟连接修复**：确保 RL 动作尽早生效
-- **L_critic 归一化**：解决 Critic 损失全程偏高问题
-- **背压控制**：优化管道通信机制，防止数据堆积
+### 2026-03-23 ~ 2026-03-29：RL 闭环基础
 
-### 4. 新增功能
-- **断点续训**：`--load_ckpt` 参数支持加载已有权重继续训练
-- **延长仿真时长**：默认 20s 以观察长期训练效果
+- RL 闭环训练（命名管道双向通信）
+- PPO + GAE(λ=0.95)
+- 节点 ID one-hot 嵌入
+- 自适应熵系数 + LR 指数衰减
+- L_critic return 归一化
 
-详见 [算法改进记录.md](docs/算法改进记录.md)
+详见 [算法改进记录](docs/算法改进记录.md)
 
 ## 许可证
 
