@@ -1,0 +1,21 @@
+# 构建产物
+out/
+results/
+logs/
+checkpoints/
+
+# OMNeT++ 生成文件（Docker 内重新生成）
+Makefile
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*~
+
+# Git
+.git/
+
+# 大文件
+*.pt
+*.elog
