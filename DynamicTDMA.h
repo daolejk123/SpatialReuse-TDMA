@@ -257,6 +257,7 @@ protected:
     // 奖励信号（供 RL 计算 reward）
     int nsucc;                    // 本帧成功传输时隙数
     int ncoll;                    // 本帧申请但遭遇冲突的时隙数
+    std::string slotResult;       // 逐时隙结果：'0'=未申请 '1'=成功 '2'=失败
     std::vector<double> pt1;      // 上一帧申请概率向量 (Pt-1)
     std::vector<double> heurProbs; // 本帧启发式申请概率向量（乘数基准，供 Python 感知）
   };

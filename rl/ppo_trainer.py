@@ -32,7 +32,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from .rl_agent import TDMAAgent, RLFeatureExtractor, compute_reward
+from .rl_agent import TDMAAgent, RLFeatureExtractor, compute_reward, compute_per_slot_reward
 from .rl_receiver import connect, ActionSender, FrameObservation, NodeObservation
 
 
@@ -96,14 +96,14 @@ class PPOConfig:
 
 @dataclass
 class NodeTransition:
-    """单节点单帧的一条转移记录。"""
+    """单节点单帧的一条转移记录（逐时隙）。"""
     feat_seq:  torch.Tensor   # (T, input_dim)  输入给网络的序列
     action:    torch.Tensor   # (M,)             实际执行的二值动作
     log_prob:  torch.Tensor   # (M,)             各维度 log π(a|s)
-    value:     float          # V(t)
-    reward:    float          # r_t
-    advantage: float = 0.0   # A_t（GAE，反向填充后赋值）
-    ret:       float = 0.0   # V-target = r + γV(t+1)
+    value:     torch.Tensor   # (M,)             逐时隙价值 V_s(t)
+    reward:    torch.Tensor   # (M,)             逐时隙奖励 r_s
+    advantage: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0))  # (M,) GAE
+    ret:       torch.Tensor = field(default_factory=lambda: torch.tensor(0.0))  # (M,) V-target
 
 
 class RolloutBuffer:
@@ -116,18 +116,19 @@ class RolloutBuffer:
         self._buf[node_id].append(trans)
 
     def compute_advantages(self, gamma: float, gae_lambda: float = 0.95):
-        """对每个节点反向计算 GAE(λ) advantage 和 return。"""
+        """对每个节点反向计算逐时隙 GAE(λ) advantage 和 return。"""
         for node_id, traj in self._buf.items():
-            gae = 0.0
+            num_slots = traj[0].value.shape[0]
+            gae = torch.zeros(num_slots, dtype=torch.float32)
             for t in reversed(range(len(traj))):
-                next_val = traj[t + 1].value if t + 1 < len(traj) else 0.0
+                next_val = traj[t + 1].value if t + 1 < len(traj) else torch.zeros(num_slots)
                 delta = traj[t].reward + gamma * next_val - traj[t].value
                 gae = delta + gamma * gae_lambda * gae
-                traj[t].advantage = gae
+                traj[t].advantage = gae.clone()
                 traj[t].ret = gae + traj[t].value
 
     def get_tensors(self, device: torch.device):
-        """将所有节点的转移打平为训练所需张量。"""
+        """将所有节点的转移打平为训练所需张量（逐时隙）。"""
         feat_seqs, actions, log_probs_old = [], [], []
         advantages, returns = [], []
 
@@ -143,8 +144,8 @@ class RolloutBuffer:
             torch.stack(feat_seqs).to(device),       # (N, T, d)
             torch.stack(actions).to(device),          # (N, M)
             torch.stack(log_probs_old).to(device),    # (N, M)
-            torch.tensor(advantages, dtype=torch.float32).to(device),  # (N,)
-            torch.tensor(returns, dtype=torch.float32).to(device),     # (N,)
+            torch.stack(advantages).to(device),       # (N, M) 逐时隙
+            torch.stack(returns).to(device),          # (N, M) 逐时隙
         )
 
     def clear(self):
@@ -166,40 +167,39 @@ def ppo_update(
     device: torch.device,
 ) -> Dict[str, float]:
     """
+    逐时隙 PPO 更新：每个时隙独立计算 ratio × advantage，解决信用分配问题。
     使用缓冲区中的轨迹执行 cfg.ppo_epochs 轮梯度更新。
     返回各损失的均值（用于日志）。
     """
     feat_seqs, actions, log_probs_old, advantages, returns = buffer.get_tensors(device)
+    # advantages: (N, M), returns: (N, M)
 
-    # 标准化 advantage
+    # 标准化 advantage（全局，跨样本和时隙）
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-    # 标准化 return（Critic 训练目标）：降低 L_critic 量级，稳定梯度
-    # 注意：Critic 输出将对应归一化后的 return，下一轮 GAE 的 baseline 仍有效
+    # 标准化 return（Critic 训练目标）
     returns_norm = (returns - returns.mean()) / (returns.std() + 1e-8)
 
     stats = collections.defaultdict(list)
 
     for _ in range(cfg.ppo_epochs):
         # 前向（不带持久隐状态，梯度更新时重置）
-        probs, values, _ = net(feat_seqs)           # (N, M), (N,)
+        probs, values, _ = net(feat_seqs)           # (N, M), (N, M)
 
         # log π(a|s)：M 个独立伯努利分布
         dist = torch.distributions.Bernoulli(probs=probs)
         log_probs = dist.log_prob(actions)         # (N, M)
         entropy   = dist.entropy().mean()          # 标量
 
-        # PPO ratio：对 M 维 log_prob 求和（联合概率对数）
-        ratio = torch.exp(
-            log_probs.sum(-1) - log_probs_old.sum(-1)
-        )                                          # (N,)
+        # 逐时隙 PPO ratio（不再求和，每个时隙独立）
+        ratio = torch.exp(log_probs - log_probs_old)  # (N, M)
 
-        # Clipped surrogate objective
-        surr1 = ratio * advantages
+        # 逐时隙 Clipped surrogate objective
+        surr1 = ratio * advantages                                          # (N, M)
         surr2 = torch.clamp(ratio, 1 - cfg.clip_eps, 1 + cfg.clip_eps) * advantages
-        actor_loss  = -torch.min(surr1, surr2).mean()
+        actor_loss  = -torch.min(surr1, surr2).mean()  # 对 N 和 M 取均值
 
-        # Critic MSE（使用归一化 return 作为目标，稳定 L_critic）
+        # 逐时隙 Critic MSE
         critic_loss = nn.functional.mse_loss(values, returns_norm)
 
         loss = actor_loss + cfg.vf_coef * critic_loss - cfg.ent_coef * entropy
@@ -373,7 +373,7 @@ def bc_pretrain(cfg: PPOConfig):
                         total_loss = torch.zeros(1, device=device)
                         for seq, target in buf:
                             x = seq.unsqueeze(0).to(device)        # (1, T, d)
-                            probs_t, _, _, _, _ = ag.net(x, None, None)
+                            probs_t, _, _ = ag.net(x, None)
                             probs = probs_t[0]                     # (M,)
                             total_loss = total_loss + F.mse_loss(probs, target.to(device))
 
@@ -455,8 +455,8 @@ def train(cfg: PPOConfig):
     frame_count   = 0
     update_count  = 0
     episode_rewards: Dict[int, float] = collections.defaultdict(float)
-    # 奖励重塑：每节点 EWMA 基线，差分奖励减小方差
-    reward_baselines: Dict[int, float] = collections.defaultdict(float)
+    # 奖励重塑：逐时隙 EWMA 基线，差分奖励减小方差
+    reward_baselines: Dict[int, torch.Tensor] = {}  # nid → (M,)
     _ewma_alpha = 0.05  # EWMA 更新步长（对应衰减 0.95）
     # 奖励延迟对齐：帧 t 的奖励（Nsucc/Ncoll）反映帧 t-1 的 RL 动作结果
     # 因此帧 t 的 transition 需等帧 t+1 的奖励来完成
@@ -487,8 +487,8 @@ def train(cfg: PPOConfig):
                 t0 = time.perf_counter()
 
                 # ── 1. 推理：每节点使用自己的 Agent ──────────────────────
-                node_probs: Dict[int, np.ndarray] = {}
-                node_values: Dict[int, float]      = {}
+                node_probs: Dict[int, np.ndarray]  = {}
+                node_values: Dict[int, np.ndarray] = {}  # 逐时隙价值 (M,)
 
                 for nid, obs in frame_obs.nodes.items():
                     ag = agents[nid]
@@ -507,7 +507,7 @@ def train(cfg: PPOConfig):
                     x = feat_seq.unsqueeze(0).to(device)            # (1, T, d)
 
                     with torch.no_grad():
-                        probs_t, value_t, new_hidden = ag.net(x, hidden)
+                        probs_t, values_t, new_hidden = ag.net(x, hidden)
 
                     ag._hidden_states[nid] = (
                         new_hidden[0].detach(), new_hidden[1].detach()
@@ -515,7 +515,7 @@ def train(cfg: PPOConfig):
                     window.append(feat)
 
                     node_probs[nid]  = probs_t[0].cpu().numpy()
-                    node_values[nid] = float(value_t[0].cpu())
+                    node_values[nid] = values_t[0].cpu().numpy()    # (M,)
 
                 # ── 2. 采样动作（因子化伯努利）─────────────────────────
                 node_actions: Dict[int, np.ndarray] = {
@@ -532,30 +532,28 @@ def train(cfg: PPOConfig):
                     actions={nid: a.tolist() for nid, a in node_actions.items()},
                 )
 
-                # ── 3. 计算奖励（本帧 Nsucc/Ncoll 是上一帧动作的结果）──
-                node_rewards: Dict[int, float] = {
-                    nid: compute_reward(
-                        obs,
-                        alpha=cfg.r_alpha, beta=cfg.r_beta,
-                        gamma=cfg.r_gamma, delta=cfg.r_delta,
-                    )
+                # ── 3. 计算逐时隙奖励（本帧 SlotResult 反映上一帧动作的结果）
+                node_rewards: Dict[int, torch.Tensor] = {
+                    nid: compute_per_slot_reward(obs, cfg.num_slots)
                     for nid, obs in frame_obs.nodes.items()
                 }
 
                 # ── 4a. 用本帧奖励完成上一帧的 pending transition ────
-                # 帧 t 的 Nsucc/Ncoll 反映帧 t-1 的 RL 动作结果
+                # 帧 t 的 SlotResult 反映帧 t-1 的 RL 动作结果
                 # 因此帧 t 的奖励应配对给帧 t-1 的动作
                 for nid in list(pending_transitions.keys()):
                     if nid in node_rewards:
-                        raw_r = node_rewards[nid]
+                        raw_r = node_rewards[nid]          # (M,) 逐时隙奖励
+                        if nid not in reward_baselines:
+                            reward_baselines[nid] = torch.zeros(cfg.num_slots)
                         baseline = reward_baselines[nid]
                         reward_baselines[nid] = baseline + _ewma_alpha * (raw_r - baseline)
-                        shaped_r = raw_r - baseline
+                        shaped_r = raw_r - baseline        # (M,) 差分奖励
 
                         pt = pending_transitions.pop(nid)
                         pt.reward = shaped_r
                         buffers[nid].add(nid, pt)
-                        episode_rewards[nid] += raw_r
+                        episode_rewards[nid] += raw_r.sum().item()  # 聚合用于日志
 
                 # ── 4b. 为本帧创建 pending transition（等下一帧奖励）──
                 for nid, obs in frame_obs.nodes.items():
@@ -581,8 +579,8 @@ def train(cfg: PPOConfig):
                         feat_seq  = feat_seq,
                         action    = act_t,
                         log_prob  = log_prob,
-                        value     = node_values[nid],
-                        reward    = 0.0,   # 占位，下一帧填充
+                        value     = torch.tensor(node_values[nid], dtype=torch.float32),  # (M,)
+                        reward    = torch.zeros(cfg.num_slots),   # 占位，下一帧填充
                     )
 
                 # ── 5. PPO 更新（每 update_every 帧，各节点独立更新）───

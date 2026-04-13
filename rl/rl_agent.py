@@ -138,8 +138,8 @@ class LSTMActorCritic(nn.Module):
         nn.init.zeros_(self.actor_head.weight)
         nn.init.zeros_(self.actor_head.bias)
 
-        # Critic：直接从 LSTM-1 输出接线性头
-        self.critic_head = nn.Linear(lstm1_hidden, 1)
+        # Critic：逐时隙价值估计，每个时隙独立的 V_s(t)
+        self.critic_head = nn.Linear(lstm1_hidden, num_slots)
 
     def forward(
         self,
@@ -159,7 +159,7 @@ class LSTMActorCritic(nn.Module):
         Returns
         -------
         probs      : (B, M)   每个时隙的乘数 α = σ(W·h + b)
-        value      : (B,)     状态价值估计 V(t)
+        values     : (B, M)   逐时隙状态价值估计 V_s(t)
         new_hidden : LSTM-1 的新 (h, c)
         """
         # LSTM-1：提取时序特征，取序列最后时刻隐状态
@@ -169,10 +169,10 @@ class LSTMActorCritic(nn.Module):
         # Actor：直接输出乘数 α
         probs = torch.sigmoid(self.actor_head(F_t))     # (B, M)
 
-        # Critic：状态价值估计
-        value = self.critic_head(F_t).squeeze(-1)       # (B,)
+        # Critic：逐时隙价值估计
+        values = self.critic_head(F_t)                  # (B, M)
 
-        return probs, value, new_hidden
+        return probs, values, new_hidden
 
 
 # ---------------------------------------------------------------------------
@@ -240,14 +240,14 @@ class TDMAAgent:
     @torch.no_grad()
     def act_and_value(
         self, frame_obs: FrameObservation
-    ) -> Tuple[Dict[int, np.ndarray], Dict[int, float]]:
+    ) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray]]:
         """
-        同时返回动作概率和状态价值，供 PPO 轨迹收集使用。
+        同时返回动作概率和逐时隙状态价值，供 PPO 轨迹收集使用。
 
         Returns
         -------
         actions : {node_id: ndarray(M,)}
-        values  : {node_id: float}
+        values  : {node_id: ndarray(M,)}  逐时隙价值估计
         """
         self.net.eval()
         actions, values = {}, {}
@@ -306,8 +306,14 @@ class TDMAAgent:
 
     def _forward_node(
         self, obs: NodeObservation
-    ) -> Tuple[np.ndarray, float]:
-        """单节点前向推理，更新滑动窗口和 LSTM 隐状态。"""
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """单节点前向推理，更新滑动窗口和 LSTM 隐状态。
+
+        Returns
+        -------
+        probs  : ndarray(M,)   每个时隙的乘数 α
+        values : ndarray(M,)   逐时隙价值估计
+        """
         feat = self.extractor(obs)
 
         # 初始化节点状态（首次出现）
@@ -324,7 +330,7 @@ class TDMAAgent:
         pads = [torch.zeros_like(feat)] * pad_len
         x = torch.stack(pads + list(window), dim=0).unsqueeze(0).to(self.device)  # (1, T, d)
 
-        probs, value, new_hidden = self.net(x, hidden)
+        probs, values, new_hidden = self.net(x, hidden)
 
         # 持久化 LSTM 隐状态（分离梯度，防止跨 episode 累积计算图）
         self._hidden_states[obs.node_id] = (
@@ -332,12 +338,39 @@ class TDMAAgent:
             new_hidden[1].detach(),
         )
 
-        return probs[0].cpu().numpy(), float(value[0].cpu())
+        return probs[0].cpu().numpy(), values[0].cpu().numpy()
 
 
 # ---------------------------------------------------------------------------
-# 奖励计算（文档 6.5 节）
+# 奖励计算
 # ---------------------------------------------------------------------------
+
+def compute_per_slot_reward(
+    obs: NodeObservation,
+    num_slots: int,
+) -> torch.Tensor:
+    """
+    逐时隙奖励分解：为每个时隙独立计算奖励，解决聚合奖励的信用分配问题。
+
+    基于 C++ 推送的 SlotResult 字符串：
+      '0' = 未申请 → r_s = 0.0（中性）
+      '1' = 申请且成功 → r_s = +1.0
+      '2' = 申请但失败 → r_s = -1.0
+
+    Returns
+    -------
+    torch.Tensor  shape (M,)  逐时隙奖励向量
+    """
+    rewards = torch.zeros(num_slots, dtype=torch.float32)
+    sr = obs.SlotResult
+    for s in range(min(num_slots, len(sr))):
+        if sr[s] == '1':
+            rewards[s] = 1.0    # 申请且成功
+        elif sr[s] == '2':
+            rewards[s] = -1.0   # 申请但失败（碰撞或拒绝）
+        # '0' = 未申请 → 0.0（默认值）
+    return rewards
+
 
 def compute_reward(
     obs: NodeObservation,
@@ -347,15 +380,9 @@ def compute_reward(
     delta: float = 0.2,
 ) -> float:
     """
-    r_t = α·Nsucc - β·Ncoll + γ·Jindex - δ·Dqueue
+    聚合奖励（旧版，仅用于日志对比）。
 
-    Parameters
-    ----------
-    obs   : NodeObservation（包含 reward_signal 字段）
-    alpha : 吞吐量权重
-    beta  : 冲突惩罚权重
-    gamma : 公平性权重
-    delta : 时延惩罚权重
+    r_t = α·Nsucc - β·Ncoll + γ·Jindex - δ·Dqueue
     """
     return (
           alpha * obs.Nsucc
@@ -383,9 +410,9 @@ if __name__ == "__main__":
 
     # 随机输入前向测试
     x = torch.randn(B, T, extractor.input_dim)
-    probs, value, hidden = net(x)
+    probs, values, hidden = net(x)
     print(f"probs.shape  = {probs.shape}   (期望 [{B}, {M}])")
-    print(f"value.shape  = {value.shape}   (期望 [{B}])")
+    print(f"values.shape = {values.shape}  (期望 [{B}, {M}])")
     print(f"probs range  = [{probs.min():.3f}, {probs.max():.3f}]  (应在 (0,1) 内)")
 
     # LSTM 隐状态持久化测试（模拟两帧）

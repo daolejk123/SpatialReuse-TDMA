@@ -52,7 +52,7 @@ class NodeObservation:
         # 公平性与机会份额
         "Sharet", "Share_avgnbr", "Jlocal", "Envy",
         # 奖励信号
-        "Nsucc", "Ncoll", "Pt1",
+        "Nsucc", "Ncoll", "SlotResult", "Pt1",
         # RL 乘数模式：本帧启发式申请概率向量（乘数基准参考）
         "HeurProb",
     )
@@ -81,10 +81,11 @@ class NodeObservation:
         self.Envy         = f["Envy"]          # 机会差异 = Share_avgnbr - Sharet
 
         rs = raw.get("reward_signal", {})
-        self.Nsucc    = rs.get("Nsucc", 0)        # 本帧成功传输时隙数
-        self.Ncoll    = rs.get("Ncoll", 0)        # 本帧冲突时隙数
-        self.Pt1      = rs.get("Pt1", [])         # 上一帧申请概率向量 (M维)
-        self.HeurProb = rs.get("HeurProb", [])    # 本帧启发式申请概率向量（乘数基准）
+        self.Nsucc      = rs.get("Nsucc", 0)        # 本帧成功传输时隙数
+        self.Ncoll      = rs.get("Ncoll", 0)        # 本帧冲突时隙数
+        self.SlotResult = rs.get("SlotResult", "")   # 逐时隙结果：'0'未申请 '1'成功 '2'失败
+        self.Pt1        = rs.get("Pt1", [])          # 上一帧申请概率向量 (M维)
+        self.HeurProb   = rs.get("HeurProb", [])     # 本帧启发式申请概率向量（乘数基准）
 
     def to_vector(self) -> List[float]:
         """将数值特征展平为 RL 状态向量（Bown 逐位展开，其余数值依次追加）。"""
@@ -489,7 +490,7 @@ def _print_frame(frame_obs: FrameObservation):
         print(f"    [公平性]    Sharet={obs.Sharet:.3f}  "
               f"Jlocal={obs.Jlocal:.3f}  Envy={obs.Envy:.3f}")
         print(f"    [奖励信号]  Nsucc={obs.Nsucc}  Ncoll={obs.Ncoll}  "
-              f"Pt1_len={len(obs.Pt1)}")
+              f"SlotResult={obs.SlotResult}  Pt1_len={len(obs.Pt1)}")
         print(f"    [状态向量维度] {len(obs.to_vector())}")
 
 

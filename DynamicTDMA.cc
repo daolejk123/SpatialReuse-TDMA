@@ -866,12 +866,22 @@ void DynamicTDMA::processSlotTimer() {
       for (int v : collHist)
         hcoll += v;
 
-      // 4.1) 本帧冲突时隙数 (Ncoll)：本节点申请且发生碰撞的时隙数
+      // 4.1) 本帧冲突时隙数 (Ncoll) + 逐时隙结果 (slotResult)
       int frameNcoll = 0;
+      std::string slotResult;
+      slotResult.reserve((size_t)numDataSlots);
       for (int s = 0; s < numDataSlots; s++) {
-        if (myPriorities[s] > 0.0 && (int)rtsApplicantsBySlot[s].size() > 1) {
-          for (int id : rtsApplicantsBySlot[s]) {
-            if (id == myId) { frameNcoll++; break; }
+        if (myPriorities[s] <= 0.0) {
+          slotResult.push_back('0');   // 未申请
+        } else if (mySlots[s]) {
+          slotResult.push_back('1');   // 申请且成功
+        } else {
+          slotResult.push_back('2');   // 申请但失败
+          // 检查是否属于碰撞
+          if ((int)rtsApplicantsBySlot[s].size() > 1) {
+            for (int id : rtsApplicantsBySlot[s]) {
+              if (id == myId) { frameNcoll++; break; }
+            }
           }
         }
       }
@@ -1081,7 +1091,8 @@ void DynamicTDMA::processSlotTimer() {
                      bownBitmap, t2hop.str(), ctrlCollisionCount, hcoll,
                      Qt, lambdaEwma, Wt, muNbr,
                      Sharet, ShareAvgNbr, Jlocal, Envy,
-                     (int)deltaTx, frameNcoll, prevPriorities, myHeurProbs});
+                     (int)deltaTx, frameNcoll, slotResult,
+                     prevPriorities, myHeurProbs});
     // 保存本帧申请概率向量，供下一帧作为 Pt-1 特征
     prevPriorities = myPriorities;
 
@@ -1824,6 +1835,7 @@ void DynamicTDMA::writeRlFeatures(const RlFrameFeatures &f) {
       << "\"reward_signal\":{"
         << "\"Nsucc\":" << f.nsucc << ","
         << "\"Ncoll\":" << f.ncoll << ","
+        << "\"SlotResult\":\"" << escapeJsonString(f.slotResult) << "\","
         << "\"Pt1\":[";
   for (int i = 0; i < (int)f.pt1.size(); i++) {
     if (i > 0) oss << ",";

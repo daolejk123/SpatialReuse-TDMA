@@ -108,8 +108,9 @@ python -m rl.ppo_trainer --num_slots 10 --num_nodes 9   # 第一步：先启 Pyt
  "slot_sensing": {"Bown":"0010...", "T2hop":"...", "Cctrl":0, "Hcoll":0},
  "queue_traffic": {"Qt":5, "lambda_ewma":2.3, "Wt":0.01, "mu_nbr":0.7},
  "fairness":      {"Sharet":0.3, "Share_avgnbr":0.4, "Jlocal":0.8, "Envy":0.1},
- "reward_signal": {"Nsucc":3, "Ncoll":1, "Pt1":[0.5,...]}}
+ "reward_signal": {"Nsucc":3, "Ncoll":1, "SlotResult":"0012001010", "Pt1":[0.5,...]}}
 ```
+- `SlotResult`：逐时隙结果字符串（M 位），`'0'`=未申请, `'1'`=成功, `'2'`=失败
 
 **动作 JSON 格式**（每帧一条，包含全部节点）：
 ```json
@@ -129,14 +130,14 @@ python -m rl.ppo_trainer --num_slots 10 --num_nodes 9   # 第一步：先启 Pyt
 - Bown（M）+ T2hop（2M，occupied_flag + min_hop_norm）+ 10个标量 + Pt1（M）+ HeurProb（M）+ 节点ID one-hot（N）
 - HeurProb：本帧 C++ 启发式申请概率向量，RL 乘数模式下作为乘数基准参考
 
-**网络架构**（LSTMActorCritic，轻量版 ~13.5K 参数）：
+**网络架构**（LSTMActorCritic，~13.8K 参数）：
 ```
 输入 (B, T, 5M+10+N)
     → LSTM-1 编码器 (hidden=32)
     → Actor: Linear(M) → Sigmoid → α ∈ (0,1)^M（乘数模式）
-    → Critic: Linear(1) → V(t)
+    → Critic: Linear(M) → V_s(t)（逐时隙价值估计）
 ```
-去掉了 LSTM-2 层（旧版 ~192K 参数严重过参数化）。Actor 输出层（actor_head）初始化为零权重：Sigmoid(0)=0.5 → 初始乘数=1.0，等效纯启发式。
+去掉了 LSTM-2 层（旧版 ~192K 参数严重过参数化）。Actor 输出层（actor_head）初始化为零权重：Sigmoid(0)=0.5 → 初始乘数=1.0，等效纯启发式。Critic 输出 M 个逐时隙价值估计，配合逐时隙奖励分解。
 
 ### 独立 Agent 架构
 
@@ -180,7 +181,9 @@ python -m rl.ppo_trainer --num_slots 10 --num_nodes 9   # 第一步：先启 Pyt
 
 7. **网络瘦身（2026-04-12 实施）**：去掉 LSTM-2 层，LSTM-1 hidden 从 128 缩至 32，参数量从 ~192K 降至 ~13.5K。旧版网络在 32~128 帧样本下严重过参数化，梯度被噪声淹没无法学习。瘦身后与旧 checkpoint 不兼容，需从零训练。
 
-8. **二值动作 + 奖励延迟对齐（2026-04-12 实施）**：修复两个架构级问题——(a) 回传给 C++ 的动作从连续 α 改为 Bernoulli 采样的二值动作（0/1），让环境反馈真正依赖于实际动作；(b) 引入 `pending_transitions` 将帧 t 的奖励 r_t 与帧 t-1 的动作 a_{t-1} 配对（因 Nsucc_t 反映 a_{t-1} 的调度结果），修复因果时序错位。修复后 entropy 下降速度翻倍但仍极慢（0.0016/83次更新），根源是**多智能体信用分配问题**：9 节点独立学习，单节点动作的奖励信号被其他节点的随机动作噪声淹没。
+8. **二值动作 + 奖励延迟对齐（2026-04-12 实施）**：修复两个架构级问题——(a) 回传给 C++ 的动作从连续 α 改为 Bernoulli 采样的二值动作（0/1），让环境反馈真正依赖于实际动作；(b) 引入 `pending_transitions` 将帧 t 的奖励 r_t 与帧 t-1 的动作 a_{t-1} 配对（因 Nsucc_t 反映 a_{t-1} 的调度结果），修复因果时序错位。
+
+9. **逐时隙奖励分解（2026-04-13 实施）**：旧版聚合奖励 `r = Nsucc - Ncoll + ...` 无法为 M=10 个独立 Bernoulli 动作分配信用——10 个动作共享 1 个标量奖励，PPO 无法区分哪个时隙决策好/坏。改进：C++ 推送逐时隙结果 `SlotResult`（'0'未申请/'1'成功/'2'失败），Python 计算逐时隙奖励 `r_s ∈ {+1, -1, 0}`。PPO 改为逐时隙 ratio × advantage（不再求和 log_prob），Critic 输出 M 个逐时隙价值估计。实验结果：**entropy 收敛速度提升 105x**（旧版 83 次更新仅降 0.0016，新版 83 次更新降 0.168），L_actor 从死寂（≈0）到活跃（+0.0076），证明逐时隙信用分配有效解决了多动作维度的奖励归因问题。
 
 ## 输出文件
 
