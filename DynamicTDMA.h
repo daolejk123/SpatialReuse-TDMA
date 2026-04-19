@@ -179,6 +179,11 @@ protected:
   int rlSyncInterval   = 0;
   double rlSyncTimeoutSec = 5.0;
 
+  // 方向 D：邻居密度自适应乘数（mult_max = 2.0 / (1.0 + 0.2 * numOneHopNeighbors)）
+  // 拓扑静态，initialize() 时缓存邻居数；关闭时走旧路径（固定 2.0）
+  bool adaptiveMultEnabled = false;
+  int  numOneHopNeighbors  = 0;
+
   // RL 命名管道：C++ → Python 实时特征推送
   // 所有节点共享同一个 fd（OMNeT++ 单线程，无竞争）
   static int sRlPipeFd;

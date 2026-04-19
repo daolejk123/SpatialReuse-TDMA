@@ -237,6 +237,12 @@ void DynamicTDMA::initialize() {
     if (rlSyncTimeoutSec <= 0.0) rlSyncTimeoutSec = 5.0;
   }
 
+  // 方向 D：读取自适应乘数开关，缓存一跳邻居数（静态拓扑，只需算一次）
+  if (hasPar("adaptiveMultiplier")) {
+    adaptiveMultEnabled = par("adaptiveMultiplier").boolValue();
+  }
+  numOneHopNeighbors = (int)getOneHopNeighborIds().size();
+
   timerMsg = new cMessage("slot-timer");
 
   // 初始化表
@@ -1296,7 +1302,12 @@ void DynamicTDMA::scheduleRequests() {
     double rlAlpha;
     double reqProb;
     if (getRlActionProb(slot, rlAlpha)) {
-      reqProb = std::min(1.0, std::max(0.0, heurProb * rlAlpha * 2.0));
+      // 方向 D：开启自适应时按邻居密度压缩乘数上限；关闭时沿用固定 2.0
+      double multMax = 2.0;
+      if (adaptiveMultEnabled) {
+        multMax = 2.0 / (1.0 + 0.2 * (double)numOneHopNeighbors);
+      }
+      reqProb = std::min(1.0, std::max(0.0, heurProb * rlAlpha * multMax));
     } else {
       reqProb = heurProb;
     }

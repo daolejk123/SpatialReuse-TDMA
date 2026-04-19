@@ -24,6 +24,8 @@
 #   --update_every N     每 N 帧执行一次 PPO 更新（默认 32）
 #   --bc_frames N        行为克隆预训练帧数（默认 0=跳过，建议 1000~2000）
 #   --bc_lr F            BC 预训练学习率（默认 1e-3）
+#   --heur_deviation_coef F  方向B 软正则系数（默认 0=禁用，建议 0.005~0.02）
+#   --seed N             随机种子（-1=不设置；>=0 公平比较消融用）
 #   --log_dir DIR        日志目录（默认 logs/<timestamp>）
 #   --gui                使用 GUI 模式运行仿真（默认 Cmdenv 命令行模式）
 #   --rebuild            强制重新编译 DynamicTDMA
@@ -73,6 +75,9 @@ UPDATE_EVERY=""
 LR_DECAY_GAMMA=""
 BC_FRAMES=""
 BC_LR=""
+HEUR_DEVIATION_COEF=""
+SEED=""
+SAVE_DIR=""
 
 # --------------------------------------------------------------------------
 # 参数解析
@@ -98,6 +103,9 @@ while [[ $# -gt 0 ]]; do
         --lr_decay_gamma)  LR_DECAY_GAMMA="$2"; shift 2 ;;
         --bc_frames)    BC_FRAMES="$2";  shift 2 ;;
         --bc_lr)        BC_LR="$2";      shift 2 ;;
+        --heur_deviation_coef) HEUR_DEVIATION_COEF="$2"; shift 2 ;;
+        --seed)         SEED="$2";       shift 2 ;;
+        --save_dir)     SAVE_DIR="$2";   shift 2 ;;
         --gui)          USE_GUI=true;     shift ;;
         --rebuild)      REBUILD=true;     shift ;;
         --dry_run)      DRY_RUN=true;     shift ;;
@@ -312,6 +320,9 @@ PPO_CMD=(
 [ -n "$LR_DECAY_GAMMA" ] && PPO_CMD+=(--lr_decay_gamma  "$LR_DECAY_GAMMA")
 [ -n "$BC_FRAMES" ]     && PPO_CMD+=(--bc_frames      "$BC_FRAMES")
 [ -n "$BC_LR" ]         && PPO_CMD+=(--bc_lr          "$BC_LR")
+[ -n "$HEUR_DEVIATION_COEF" ] && PPO_CMD+=(--heur_deviation_coef "$HEUR_DEVIATION_COEF")
+[ -n "$SEED" ]          && PPO_CMD+=(--seed           "$SEED")
+[ -n "$SAVE_DIR" ]      && PPO_CMD+=(--save_dir       "$SAVE_DIR")
 
 info "命令: ${PPO_CMD[*]}"
 

@@ -60,6 +60,10 @@ class PPOConfig:
     entropy_adapt_low:  float = 0.45  # 低于此值：用 ent_coef_high（稳定），防崩溃阈值
     max_grad_norm: float = 0.5     # 梯度裁剪
 
+    # 方向 B：KL-to-Heuristic 软正则（α 偏离 0.5 的代价），0.0 = 禁用
+    # 建议消融值 0.005 ~ 0.02；防止 RL 在本可用启发式的稳定时隙盲目偏离
+    heur_deviation_coef: float = 0.0
+
     # 训练节奏
     update_every: int   = 128      # 每 K 帧执行一次 PPO 更新
     ppo_epochs:   int   = 4        # 每次更新的梯度步数
@@ -88,6 +92,11 @@ class PPOConfig:
     # N > 0 = 每 N 帧 Python 切换为阻塞写，配合 C++ 端 select 等待，保证动作必达
     sync_interval:  int   = 0
     sync_timeout:   float = 5.0   # 阻塞写超时（秒）
+
+    # 随机种子（消融实验公平性）
+    # -1 = 不设置（原行为，torch/numpy 使用各自默认随机源）
+    # >=0 = 同时设置 torch.manual_seed 和 np.random.seed，保证网络初始权重与采样可复现
+    seed: int = -1
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +212,12 @@ def ppo_update(
         critic_loss = nn.functional.mse_loss(values, returns_norm)
 
         loss = actor_loss + cfg.vf_coef * critic_loss - cfg.ent_coef * entropy
+
+        # 方向 B：α 远离 0.5 的软正则（KL-to-Heuristic 简化版）
+        if cfg.heur_deviation_coef > 0:
+            heur_dev = ((probs - 0.5) ** 2).mean()
+            loss = loss + cfg.heur_deviation_coef * heur_dev
+            stats["heur_dev"].append(heur_dev.item())
 
         optimizer.zero_grad()
         loss.backward()
@@ -416,6 +431,12 @@ def bc_pretrain(cfg: PPOConfig):
 # ---------------------------------------------------------------------------
 
 def train(cfg: PPOConfig):
+    # 种子（消融实验公平性：各组相同 seed 下网络初始权重 + Bernoulli 采样一致）
+    if cfg.seed >= 0:
+        torch.manual_seed(cfg.seed)
+        np.random.seed(cfg.seed)
+        print(f"[PPO] 已设置随机种子 seed={cfg.seed}")
+
     device = torch.device(cfg.device)
     save_dir = Path(cfg.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -614,9 +635,12 @@ def train(cfg: PPOConfig):
 
                     update_count += 1
                     # 聚合各节点损失（均值，用于日志和自适应 ent_coef）
+                    _keys = ['actor_loss', 'critic_loss', 'entropy']
+                    if cfg.heur_deviation_coef > 0:
+                        _keys.append('heur_dev')
                     losses = {
                         k: float(np.mean([node_losses[nid][k] for nid in node_losses]))
-                        for k in ['actor_loss', 'critic_loss', 'entropy']
+                        for k in _keys
                     }
                     _last_entropy = losses['entropy']
 
@@ -625,6 +649,10 @@ def train(cfg: PPOConfig):
 
                     elapsed = time.perf_counter() - t0
                     cur_lr  = schedulers[0].get_last_lr()[0]
+                    heur_dev_str = (
+                        f"heur_dev={losses['heur_dev']:.4f}  "
+                        if 'heur_dev' in losses else ""
+                    )
                     print(
                         f"[PPO] frame={frame_count:5d}  update={update_count:4d}  "
                         f"avg_r={avg_r:+.3f}  "
@@ -632,6 +660,7 @@ def train(cfg: PPOConfig):
                         f"L_critic={losses['critic_loss']:.4f}  "
                         f"entropy={losses['entropy']:.4f}  "
                         f"ent={cfg.ent_coef:.3f}  "
+                        f"{heur_dev_str}"
                         f"lr={cur_lr:.2e}  "
                         f"({elapsed*1000:.1f}ms)"
                     )
@@ -690,10 +719,14 @@ def _parse_args() -> PPOConfig:
                    help="RL 同步间隔帧数（0=异步，N=每N帧阻塞写确保动作必达，需与 omnetpp.ini rlSyncInterval 一致）")
     p.add_argument("--sync_timeout",  type=float, default=5.0,
                    help="同步写超时（秒），超时后继续训练不阻塞")
+    p.add_argument("--heur_deviation_coef", type=float, default=0.0,
+                   help="方向B: α 偏离 0.5 的软正则系数（0=禁用，建议 0.005~0.02）")
     p.add_argument("--bc_frames",  type=int,   default=0,
                    help="行为克隆预训练帧数（0=跳过BC，直接RL训练）")
     p.add_argument("--bc_lr",      type=float, default=1e-3,
                    help="BC 预训练阶段学习率（默认 1e-3，高于 RL 的 3e-4）")
+    p.add_argument("--seed",       type=int,   default=-1,
+                   help="随机种子（-1=不设置；>=0 同时设置 torch/numpy seed，消融实验使用）")
     args = p.parse_args()
     cfg = PPOConfig()
     for k, v in vars(args).items():

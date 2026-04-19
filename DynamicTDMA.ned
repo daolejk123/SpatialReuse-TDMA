@@ -35,6 +35,11 @@ simple DynamicTDMA
         int rlSyncInterval = default(0);
         double rlSyncTimeoutSec = default(5.0); // 同步等待超时（秒），超时后回退到启发式
 
+        // 方向 D：邻居密度自适应 clamp 乘数
+        // false = 所有节点使用固定乘数上限 2.0（原行为）
+        // true  = mult_max = 2.0 / (1.0 + 0.2 * numOneHopNeighbors)，邻居多的节点压缩探索空间
+        bool adaptiveMultiplier = default(false);
+
         // 仿真显示相关
         @display("i=block/mac");
 
