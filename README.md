@@ -130,6 +130,19 @@ python -m rl.ppo_trainer --num_slots 10 --num_nodes 9  # 第一步
 ./scripts/run_joint.sh --num_slots 10 --num_nodes 9 --load_ckpt checkpoints/tdma_ppo_latest.pt
 ```
 
+### 最近一次完整训练记录
+
+2026-04-25 使用 `checkpoints/tdma_ppo_latest.pt` 断点续训，异步模式运行到 `sim-time-limit=15000s` 正常结束：
+
+```text
+log_dir=logs/20260425_191449
+frame=53504  update=418  avg_r=-0.667
+L_actor=+0.0002  L_critic=0.0645
+entropy=0.0058  ent=0.100  lr=2.43e-04
+```
+
+本次训练保存了 `checkpoints/tdma_ppo_latest.pt` 和 `checkpoints/tdma_ppo_frame53500.pt`。OMNeT++ 结束时仍有 `data-phase-finalize` / `tx-finished` self-message 的 `undisposed object` 提示，属于资源清理问题，仿真进程本身正常退出。
+
 ## 端到端验证
 
 以下步骤可验证 C++ 仿真 → 命名管道 → Python RL 训练的完整数据流是否走通。
