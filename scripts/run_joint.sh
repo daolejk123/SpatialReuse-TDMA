@@ -26,6 +26,7 @@
 #   --bc_lr F            BC 预训练学习率（默认 1e-3）
 #   --heur_deviation_coef F  方向B 软正则系数（默认 0=禁用，建议 0.005~0.02）
 #   --seed N             随机种子（-1=不设置；>=0 公平比较消融用）
+#   --metrics_dir DIR    网络指标输出目录（默认使用 results/ 下的时间戳文件）
 #   --log_dir DIR        日志目录（默认 logs/<timestamp>）
 #   --gui                使用 GUI 模式运行仿真（默认 Cmdenv 命令行模式）
 #   --rebuild            强制重新编译 DynamicTDMA
@@ -78,6 +79,7 @@ BC_LR=""
 HEUR_DEVIATION_COEF=""
 SEED=""
 SAVE_DIR=""
+METRICS_DIR=""
 
 # --------------------------------------------------------------------------
 # 参数解析
@@ -106,6 +108,7 @@ while [[ $# -gt 0 ]]; do
         --heur_deviation_coef) HEUR_DEVIATION_COEF="$2"; shift 2 ;;
         --seed)         SEED="$2";       shift 2 ;;
         --save_dir)     SAVE_DIR="$2";   shift 2 ;;
+        --metrics_dir)  METRICS_DIR="$2"; shift 2 ;;
         --gui)          USE_GUI=true;     shift ;;
         --rebuild)      REBUILD=true;     shift ;;
         --dry_run)      DRY_RUN=true;     shift ;;
@@ -193,6 +196,7 @@ info "sync_timeout = $SYNC_TIMEOUT s"
 info "load_ckpt    = ${LOAD_CKPT:-（新训练，不加载权重）}"
 info "log_dir      = $LOG_DIR"
 info "use_gui      = $USE_GUI"
+[ -n "$METRICS_DIR" ] && info "metrics_dir  = $METRICS_DIR"
 [ -n "$ENT_COEF" ]    && info "ent_coef     = $ENT_COEF"
 [ -n "$PPO_EPOCHS" ]  && info "ppo_epochs   = $PPO_EPOCHS"
 [ -n "$R_GAMMA" ]     && info "r_gamma      = $R_GAMMA"
@@ -294,6 +298,10 @@ sed \
     -e "s|^\(\*\*\.nodes\[\*\]\.rlSyncInterval\s*=\s*\).*|\1$SYNC_INTERVAL|" \
     -e "s|^\(\*\*\.nodes\[\*\]\.rlSyncTimeoutSec\s*=\s*\).*|\1$SYNC_TIMEOUT|" \
     omnetpp.ini > "$TEMP_INI"
+if [ -n "$METRICS_DIR" ]; then
+    mkdir -p "$METRICS_DIR"
+    printf '\n**.nodes[*].metricsOutputDir = "%s"\n' "$METRICS_DIR" >> "$TEMP_INI"
+fi
 info "临时 ini: $(basename "$TEMP_INI")  (rlSyncInterval=$SYNC_INTERVAL, rlSyncTimeoutSec=$SYNC_TIMEOUT)"
 
 # --------------------------------------------------------------------------

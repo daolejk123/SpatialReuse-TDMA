@@ -6,6 +6,7 @@
 #include <sstream>
 #include <algorithm>
 #include <filesystem>
+#include <system_error>
 
 Define_Module(DynamicTDMA);
 
@@ -47,6 +48,15 @@ static std::string buildTimestampedDir(const std::string &prefix,
   std::ostringstream oss;
   oss << prefix << std::put_time(&tm, "%Y%m%d_%H%M%S");
   return useResultsDir ? ("results/" + oss.str()) : oss.str();
+}
+
+static std::string joinPath(const std::string &dir, const std::string &name) {
+  if (dir.empty())
+    return name;
+  char last = dir[dir.size() - 1];
+  if (last == '/' || last == '\\')
+    return dir + name;
+  return dir + "/" + name;
 }
 
 static std::string escapeJsonString(const std::string &s) {
@@ -160,46 +170,72 @@ void DynamicTDMA::initialize() {
   lastGeneratedThisFrame = 0;
   prevQueueSize = 0;
 
-  // 统计输出文件：每次仿真按时间命名一次（所有节点共用同一路径）
+  // 统计输出文件：每次仿真所有节点共用同一路径。
   static std::string gStatsCsvPath;
   static std::string gFrameMetricsPath;
   static std::string gFairnessPath;
   static std::string gFeatureBaseDir;
   if (gStatsCsvPath.empty() || gFrameMetricsPath.empty() ||
       gFairnessPath.empty() || gFeatureBaseDir.empty()) {
-    // 优先写到 results/ 目录；失败时回退到当前目录
-    std::string primary = buildTimestampedStatsPath("slot_stats_", true);
-    std::ofstream test(primary, std::ios::app);
-    if (test.is_open()) {
-      gStatsCsvPath = primary;
-      test.close();
-    } else {
-      gStatsCsvPath = buildTimestampedStatsPath("slot_stats_", false);
+    std::string metricsDir =
+        hasPar("metricsOutputDir") ? par("metricsOutputDir").stdstringValue()
+                                   : "";
+    if (!metricsDir.empty()) {
+      std::error_code ec;
+      std::filesystem::create_directories(metricsDir, ec);
+      if (!ec) {
+        gStatsCsvPath = joinPath(metricsDir, "slot_stats.csv");
+        gFrameMetricsPath = joinPath(metricsDir, "frame_metrics.csv");
+        gFairnessPath = joinPath(metricsDir, "fairness.csv");
+        gFeatureBaseDir = joinPath(metricsDir, "node_features");
+        std::filesystem::create_directories(gFeatureBaseDir, ec);
+      }
+      if (ec) {
+        EV << "WARNING: Cannot create metricsOutputDir (" << metricsDir
+           << "), falling back to timestamped results output." << endl;
+        gStatsCsvPath.clear();
+        gFrameMetricsPath.clear();
+        gFairnessPath.clear();
+        gFeatureBaseDir.clear();
+      }
     }
-    std::string framePrimary =
-        buildTimestampedStatsPath("frame_metrics_", true);
-    std::ofstream frameTest(framePrimary, std::ios::app);
-    if (frameTest.is_open()) {
-      gFrameMetricsPath = framePrimary;
-      frameTest.close();
-    } else {
-      gFrameMetricsPath = buildTimestampedStatsPath("frame_metrics_", false);
-    }
-    std::string fairPrimary = buildTimestampedStatsPath("fairness_", true);
-    std::ofstream fairTest(fairPrimary, std::ios::app);
-    if (fairTest.is_open()) {
-      gFairnessPath = fairPrimary;
-      fairTest.close();
-    } else {
-      gFairnessPath = buildTimestampedStatsPath("fairness_", false);
-    }
-    std::string featurePrimary = buildTimestampedDir("node_features_", true);
-    gFeatureBaseDir = featurePrimary;
-    std::error_code ec;
-    std::filesystem::create_directories(gFeatureBaseDir, ec);
-    if (ec) {
-      gFeatureBaseDir = buildTimestampedDir("node_features_", false);
+
+    if (gStatsCsvPath.empty() || gFrameMetricsPath.empty() ||
+        gFairnessPath.empty() || gFeatureBaseDir.empty()) {
+      // 优先写到 results/ 目录；失败时回退到当前目录
+      std::string primary = buildTimestampedStatsPath("slot_stats_", true);
+      std::ofstream test(primary, std::ios::app);
+      if (test.is_open()) {
+        gStatsCsvPath = primary;
+        test.close();
+      } else {
+        gStatsCsvPath = buildTimestampedStatsPath("slot_stats_", false);
+      }
+      std::string framePrimary =
+          buildTimestampedStatsPath("frame_metrics_", true);
+      std::ofstream frameTest(framePrimary, std::ios::app);
+      if (frameTest.is_open()) {
+        gFrameMetricsPath = framePrimary;
+        frameTest.close();
+      } else {
+        gFrameMetricsPath = buildTimestampedStatsPath("frame_metrics_", false);
+      }
+      std::string fairPrimary = buildTimestampedStatsPath("fairness_", true);
+      std::ofstream fairTest(fairPrimary, std::ios::app);
+      if (fairTest.is_open()) {
+        gFairnessPath = fairPrimary;
+        fairTest.close();
+      } else {
+        gFairnessPath = buildTimestampedStatsPath("fairness_", false);
+      }
+      std::string featurePrimary = buildTimestampedDir("node_features_", true);
+      gFeatureBaseDir = featurePrimary;
+      std::error_code ec;
       std::filesystem::create_directories(gFeatureBaseDir, ec);
+      if (ec) {
+        gFeatureBaseDir = buildTimestampedDir("node_features_", false);
+        std::filesystem::create_directories(gFeatureBaseDir, ec);
+      }
     }
   }
   statsCsvPath = gStatsCsvPath;

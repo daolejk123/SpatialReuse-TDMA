@@ -6,7 +6,7 @@
 #   1. 4 组实验（baseline / D / B / D+B） × N 个 seed 串行运行
 #   2. 每组均从零训练（清空 latest.pt），相同 seed 下 torch 初始权重一致
 #   3. 每次运行独立修改 omnetpp.ini（seed-set + adaptiveMultiplier），结束后恢复
-#   4. 每次运行独立日志目录 + 独立 final checkpoint，便于后续对比
+#   4. 每次运行独立日志目录 + checkpoint + 网络指标目录，便于后续对比
 #
 # 用法：
 #   ./scripts/ablation.sh [--sim_time 15000] [--seeds "1 2 3"] [--groups "baseline D B DB"]
@@ -117,13 +117,15 @@ run_one() {
         info "[DRY] rm -f checkpoints/tdma_ppo_latest.pt"
         info "[DRY] run_joint.sh --num_slots $NUM_SLOTS --num_nodes $NUM_NODES \\"
         info "                   --seed $seed --heur_deviation_coef $HDEV \\"
-        info "                   --log_dir $LOG_DIR"
+        info "                   --log_dir $LOG_DIR --metrics_dir $LOG_DIR/metrics"
         return
     fi
 
     # 为每次运行建立隔离的 checkpoint 目录（frame*.pt 和 latest.pt 均落此处）
     local CKPT_DIR="$LOG_DIR/checkpoints"
+    local METRICS_DIR="$LOG_DIR/metrics"
     mkdir -p "$CKPT_DIR"
+    mkdir -p "$METRICS_DIR"
 
     prepare_ini "$seed" "$ADAPTIVE"
     info "omnetpp.ini: seed-set=${seed}, adaptiveMultiplier=${ADAPTIVE}, sim-time-limit=${SIM_TIME}s"
@@ -139,6 +141,7 @@ run_one() {
         --heur_deviation_coef "$HDEV" \
         --log_dir "$LOG_DIR" \
         --save_dir "$CKPT_DIR" \
+        --metrics_dir "$METRICS_DIR" \
         2>&1 | tee "$LOG_DIR/ablation.log" || {
             warn "run_joint.sh 返回非零，继续后续实验"
         }

@@ -40,6 +40,9 @@ simple DynamicTDMA
         // true  = mult_max = 2.0 / (1.0 + 0.2 * numOneHopNeighbors)，邻居多的节点压缩探索空间
         bool adaptiveMultiplier = default(false);
 
+        // 指标输出目录；为空时沿用 results/ 下按时间戳命名的默认输出。
+        string metricsOutputDir = default("");
+
         // 仿真显示相关
         @display("i=block/mac");
 
