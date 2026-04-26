@@ -11,6 +11,7 @@
 # 用法：
 #   ./scripts/ablation.sh [--sim_time 15000] [--seeds "1 2 3"] [--groups "baseline D B DB"]
 #                        [--num_slots 10] [--num_nodes 9] [--heur_coef 0.01]
+#                        [--idle_queue_penalty 0.05]
 #                        [--dry_run]
 # =============================================================================
 set -e
@@ -26,6 +27,7 @@ ABL_GROUPS="baseline D B DB"
 NUM_SLOTS=10
 NUM_NODES=9
 HEUR_COEF="0.01"
+IDLE_QUEUE_PENALTY=""
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -36,6 +38,7 @@ while [[ $# -gt 0 ]]; do
         --num_slots)  NUM_SLOTS="$2";  shift 2 ;;
         --num_nodes)  NUM_NODES="$2";  shift 2 ;;
         --heur_coef)  HEUR_COEF="$2";  shift 2 ;;
+        --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
         --dry_run)    DRY_RUN=true;    shift ;;
         --help|-h)    grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "[ERROR] 未知参数: $1" >&2; exit 1 ;;
@@ -77,6 +80,7 @@ TOTAL_RUNS=$((NUM_SEEDS * NUM_ABL_GROUPS))
 info "消融计划: ${NUM_ABL_GROUPS} 组 × ${NUM_SEEDS} seed = ${TOTAL_RUNS} 次运行"
 info "每次: sim-time-limit = ${SIM_TIME}s"
 info "启用 B 时的 heur_deviation_coef = ${HEUR_COEF}"
+[ -n "$IDLE_QUEUE_PENALTY" ] && info "idle_queue_penalty = ${IDLE_QUEUE_PENALTY}"
 
 # ---- 组 → 参数映射 ----
 group_params() {
@@ -117,6 +121,7 @@ run_one() {
         info "[DRY] rm -f checkpoints/tdma_ppo_latest.pt"
         info "[DRY] run_joint.sh --num_slots $NUM_SLOTS --num_nodes $NUM_NODES \\"
         info "                   --seed $seed --heur_deviation_coef $HDEV \\"
+        [ -n "$IDLE_QUEUE_PENALTY" ] && info "                   --idle_queue_penalty $IDLE_QUEUE_PENALTY \\"
         info "                   --log_dir $LOG_DIR --metrics_dir $LOG_DIR/metrics"
         return
     fi
@@ -131,6 +136,8 @@ run_one() {
     info "omnetpp.ini: seed-set=${seed}, adaptiveMultiplier=${ADAPTIVE}, sim-time-limit=${SIM_TIME}s"
 
     local T0=$(date +%s)
+    local IDLE_ARGS=()
+    [ -n "$IDLE_QUEUE_PENALTY" ] && IDLE_ARGS=(--idle_queue_penalty "$IDLE_QUEUE_PENALTY")
 
     # 调用 run_joint.sh（含环境激活/编译检查/管道清理/进程守护/日志收集）
     # --save_dir 让 ppo_trainer 把 ckpt 写到本次隔离目录（不污染项目 checkpoints/）
@@ -139,6 +146,7 @@ run_one() {
         --num_nodes "$NUM_NODES" \
         --seed "$seed" \
         --heur_deviation_coef "$HDEV" \
+        "${IDLE_ARGS[@]}" \
         --log_dir "$LOG_DIR" \
         --save_dir "$CKPT_DIR" \
         --metrics_dir "$METRICS_DIR" \

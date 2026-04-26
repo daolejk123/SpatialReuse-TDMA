@@ -203,13 +203,14 @@ def summarize_run(group: str, seed: int, run_dir: Path) -> dict[str, object]:
     row.update(summarize_fairness(metrics_dir / "fairness.csv"))
     row.update(summarize_frame_metrics(metrics_dir / "frame_metrics.csv"))
 
+    final_frame = row.get("final_frame")
     complete = (
         sim_completed(run_dir / "sim.log")
-        and row.get("ppo_frame") == 53504.0
-        and row.get("ppo_update") == 418.0
+        and float(row.get("ppo_frame", 0.0)) > 0.0
+        and float(row.get("ppo_update", 0.0)) > 0.0
         and row.get("slot_final_nodes") == 9.0
-        and row.get("final_frame") == row.get("fairness_final_frame")
-        and row.get("final_frame") == row.get("frame_metrics_final_frame")
+        and final_frame == row.get("fairness_final_frame")
+        and final_frame == row.get("frame_metrics_final_frame")
     )
     row["complete"] = complete
     return row

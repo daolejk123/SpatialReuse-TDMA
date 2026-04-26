@@ -348,6 +348,7 @@ class TDMAAgent:
 def compute_per_slot_reward(
     obs: NodeObservation,
     num_slots: int,
+    idle_queue_penalty: float = 0.0,
 ) -> torch.Tensor:
     """
     逐时隙奖励分解：为每个时隙独立计算奖励，解决聚合奖励的信用分配问题。
@@ -356,6 +357,9 @@ def compute_per_slot_reward(
       '0' = 未申请 → r_s = 0.0（中性）
       '1' = 申请且成功 → r_s = +1.0
       '2' = 申请但失败 → r_s = -1.0
+
+    当 idle_queue_penalty > 0 且本节点队列非空时，对未申请时隙施加轻微惩罚，
+    避免策略通过“有包不发”获得过于保守的高 reward。
 
     Returns
     -------
@@ -368,7 +372,9 @@ def compute_per_slot_reward(
             rewards[s] = 1.0    # 申请且成功
         elif sr[s] == '2':
             rewards[s] = -1.0   # 申请但失败（碰撞或拒绝）
-        # '0' = 未申请 → 0.0（默认值）
+        elif sr[s] == '0' and idle_queue_penalty > 0 and obs.Qt > 0:
+            rewards[s] = -idle_queue_penalty
+        # '0' = 未申请且无队列 → 0.0（默认值）
     return rewards
 
 

@@ -25,6 +25,7 @@
 #   --bc_frames N        行为克隆预训练帧数（默认 0=跳过，建议 1000~2000）
 #   --bc_lr F            BC 预训练学习率（默认 1e-3）
 #   --heur_deviation_coef F  方向B 软正则系数（默认 0=禁用，建议 0.005~0.02）
+#   --idle_queue_penalty F   有队列但未申请时隙的惩罚（默认 0=禁用，建议 0.05）
 #   --seed N             随机种子（-1=不设置；>=0 公平比较消融用）
 #   --metrics_dir DIR    网络指标输出目录（默认使用 results/ 下的时间戳文件）
 #   --log_dir DIR        日志目录（默认 logs/<timestamp>）
@@ -77,6 +78,7 @@ LR_DECAY_GAMMA=""
 BC_FRAMES=""
 BC_LR=""
 HEUR_DEVIATION_COEF=""
+IDLE_QUEUE_PENALTY=""
 SEED=""
 SAVE_DIR=""
 METRICS_DIR=""
@@ -106,6 +108,7 @@ while [[ $# -gt 0 ]]; do
         --bc_frames)    BC_FRAMES="$2";  shift 2 ;;
         --bc_lr)        BC_LR="$2";      shift 2 ;;
         --heur_deviation_coef) HEUR_DEVIATION_COEF="$2"; shift 2 ;;
+        --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
         --seed)         SEED="$2";       shift 2 ;;
         --save_dir)     SAVE_DIR="$2";   shift 2 ;;
         --metrics_dir)  METRICS_DIR="$2"; shift 2 ;;
@@ -201,6 +204,7 @@ info "use_gui      = $USE_GUI"
 [ -n "$PPO_EPOCHS" ]  && info "ppo_epochs   = $PPO_EPOCHS"
 [ -n "$R_GAMMA" ]     && info "r_gamma      = $R_GAMMA"
 [ -n "$UPDATE_EVERY" ] && info "update_every = $UPDATE_EVERY"
+[ -n "$IDLE_QUEUE_PENALTY" ] && info "idle_queue_penalty = $IDLE_QUEUE_PENALTY"
 
 if [ "$SYNC_INTERVAL" -gt 0 ] 2>/dev/null; then
     warn "同步模式已开启（sync_interval=$SYNC_INTERVAL），仿真速度将受 Python 推理速度限制"
@@ -329,6 +333,7 @@ PPO_CMD=(
 [ -n "$BC_FRAMES" ]     && PPO_CMD+=(--bc_frames      "$BC_FRAMES")
 [ -n "$BC_LR" ]         && PPO_CMD+=(--bc_lr          "$BC_LR")
 [ -n "$HEUR_DEVIATION_COEF" ] && PPO_CMD+=(--heur_deviation_coef "$HEUR_DEVIATION_COEF")
+[ -n "$IDLE_QUEUE_PENALTY" ] && PPO_CMD+=(--idle_queue_penalty "$IDLE_QUEUE_PENALTY")
 [ -n "$SEED" ]          && PPO_CMD+=(--seed           "$SEED")
 [ -n "$SAVE_DIR" ]      && PPO_CMD+=(--save_dir       "$SAVE_DIR")
 

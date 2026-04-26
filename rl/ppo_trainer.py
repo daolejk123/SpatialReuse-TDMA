@@ -64,6 +64,9 @@ class PPOConfig:
     # 建议消融值 0.005 ~ 0.02；防止 RL 在本可用启发式的稳定时隙盲目偏离
     heur_deviation_coef: float = 0.0
 
+    # 有队列但未申请的轻量惩罚，0.0 = 禁用（保持旧 reward 完全一致）
+    idle_queue_penalty: float = 0.0
+
     # 训练节奏
     update_every: int   = 128      # 每 K 帧执行一次 PPO 更新
     ppo_epochs:   int   = 4        # 每次更新的梯度步数
@@ -555,7 +558,11 @@ def train(cfg: PPOConfig):
 
                 # ── 3. 计算逐时隙奖励（本帧 SlotResult 反映上一帧动作的结果）
                 node_rewards: Dict[int, torch.Tensor] = {
-                    nid: compute_per_slot_reward(obs, cfg.num_slots)
+                    nid: compute_per_slot_reward(
+                        obs,
+                        cfg.num_slots,
+                        idle_queue_penalty=cfg.idle_queue_penalty,
+                    )
                     for nid, obs in frame_obs.nodes.items()
                 }
 
@@ -721,6 +728,8 @@ def _parse_args() -> PPOConfig:
                    help="同步写超时（秒），超时后继续训练不阻塞")
     p.add_argument("--heur_deviation_coef", type=float, default=0.0,
                    help="方向B: α 偏离 0.5 的软正则系数（0=禁用，建议 0.005~0.02）")
+    p.add_argument("--idle_queue_penalty", type=float, default=0.0,
+                   help="有队列但未申请时隙的轻量惩罚（0=禁用，建议 0.05）")
     p.add_argument("--bc_frames",  type=int,   default=0,
                    help="行为克隆预训练帧数（0=跳过BC，直接RL训练）")
     p.add_argument("--bc_lr",      type=float, default=1e-3,
