@@ -35,6 +35,8 @@
 #   --sim_time N         写入临时 ini 的 sim-time-limit（秒）
 #   --adaptive_multiplier BOOL 写入临时 ini 的 adaptiveMultiplier
 #   --record_eventlog BOOL 写入临时 ini 的 record-eventlog
+#   --topology_mode MODE 写入临时 ini 的 topologyMode（line/ring/star/grid/clustered/full）
+#   --grid_cols N        grid 拓扑列数
 #   --log_dir DIR        日志目录（默认 logs/<timestamp>）
 #   --gui                使用 GUI 模式运行仿真（默认 Cmdenv 命令行模式）
 #   --rebuild            强制重新编译 DynamicTDMA
@@ -94,6 +96,8 @@ METRICS_MODE="full"
 SIM_TIME=""
 ADAPTIVE_MULTIPLIER=""
 RECORD_EVENTLOG=""
+TOPOLOGY_MODE=""
+GRID_COLS=""
 
 # --------------------------------------------------------------------------
 # 参数解析
@@ -131,6 +135,8 @@ while [[ $# -gt 0 ]]; do
         --sim_time)     SIM_TIME="$2"; shift 2 ;;
         --adaptive_multiplier) ADAPTIVE_MULTIPLIER="$2"; shift 2 ;;
         --record_eventlog) RECORD_EVENTLOG="$2"; shift 2 ;;
+        --topology_mode) TOPOLOGY_MODE="$2"; shift 2 ;;
+        --grid_cols)    GRID_COLS="$2"; shift 2 ;;
         --gui)          USE_GUI=true;     shift ;;
         --rebuild)      REBUILD=true;     shift ;;
         --dry_run)      DRY_RUN=true;     shift ;;
@@ -157,6 +163,12 @@ case "$METRICS_MODE" in
     full|summary|off) ;;
     *) error "metrics_mode 只能是 full、summary 或 off，当前: $METRICS_MODE"; exit 1 ;;
 esac
+if [ -n "$TOPOLOGY_MODE" ]; then
+    case "$TOPOLOGY_MODE" in
+        line|ring|star|grid|clustered|full) ;;
+        *) error "topology_mode 只能是 line、ring、star、grid、clustered 或 full，当前: $TOPOLOGY_MODE"; exit 1 ;;
+    esac
+fi
 
 # --------------------------------------------------------------------------
 # 环境检查
@@ -218,6 +230,8 @@ done
 section "运行配置"
 info "num_slots    = $NUM_SLOTS"
 info "num_nodes    = $NUM_NODES"
+[ -n "$TOPOLOGY_MODE" ] && info "topology_mode= $TOPOLOGY_MODE"
+[ -n "$GRID_COLS" ] && info "grid_cols    = $GRID_COLS"
 info "sync_interval= $SYNC_INTERVAL  (0=异步, N>0=每N帧同步)"
 info "sync_timeout = $SYNC_TIMEOUT s"
 info "load_ckpt    = ${LOAD_CKPT:-（新训练，不加载权重）}"
@@ -360,8 +374,14 @@ set_or_append_ini() {
 
 [ -n "$SIM_TIME" ] && set_or_append_ini '^sim-time-limit[[:space:]]*=' "sim-time-limit = ${SIM_TIME}s"
 [ -n "$RECORD_EVENTLOG" ] && set_or_append_ini '^record-eventlog[[:space:]]*=' "record-eventlog = ${RECORD_EVENTLOG}"
+[ -n "$NUM_NODES" ] && set_or_append_ini '^\*\.numNodes[[:space:]]*=' "*.numNodes = ${NUM_NODES}"
+[ -n "$NUM_NODES" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.numNodes[[:space:]]*=' "**.nodes[*].numNodes = ${NUM_NODES}"
+[ -n "$NUM_SLOTS" ] && set_or_append_ini '^\*\.numDataSlots[[:space:]]*=' "*.numDataSlots = ${NUM_SLOTS}"
+[ -n "$NUM_SLOTS" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.numDataSlots[[:space:]]*=' "**.nodes[*].numDataSlots = ${NUM_SLOTS}"
 [ -n "$SEED" ] && set_or_append_ini '^seed-set[[:space:]]*=' "seed-set = ${SEED}"
 [ -n "$ADAPTIVE_MULTIPLIER" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.adaptiveMultiplier[[:space:]]*=' "**.nodes[*].adaptiveMultiplier = ${ADAPTIVE_MULTIPLIER}"
+[ -n "$TOPOLOGY_MODE" ] && set_or_append_ini '^\*\.topologyMode[[:space:]]*=' "*.topologyMode = \"${TOPOLOGY_MODE}\""
+[ -n "$GRID_COLS" ] && set_or_append_ini '^\*\.gridCols[[:space:]]*=' "*.gridCols = ${GRID_COLS}"
 set_or_append_ini '^\*\*\.nodes\[\*\]\.metricsMode[[:space:]]*=' "**.nodes[*].metricsMode = \"${METRICS_MODE}\""
 set_or_append_ini '^\*\*\.nodes\[\*\]\.rlStatePipePath[[:space:]]*=' "**.nodes[*].rlStatePipePath = \"${STATE_PIPE}\""
 set_or_append_ini '^\*\*\.nodes\[\*\]\.rlActionPipePath[[:space:]]*=' "**.nodes[*].rlActionPipePath = \"${ACTION_PIPE}\""

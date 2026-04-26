@@ -6,6 +6,8 @@ network TDMANetwork
     parameters:
         int numNodes = default(9); // 默认节点数量
         int numDataSlots = default(10);
+        string topologyMode = default("ring");
+        int gridCols = default(3);
         @display("bgb=795,748");    // 画布大小
 
     submodules:
@@ -14,33 +16,36 @@ network TDMANetwork
         }
 
     connections allowunconnected:
-        // 创建全连接拓扑 (Full Mesh)
-        // 这里的 ++ 语法会自动扩展向量门的大小
-        //for i=0..numNodes-1, for j=0..numNodes-1 {
-        //    nodes[i].radioOut++ --> nodes[j].radioIn++ if i != j;
-        //}
-        nodes[1].radioOut++ --> nodes[2].radioIn++;
-        nodes[2].radioOut++ --> nodes[1].radioIn++;
+        for i=0..numNodes-1, for j=0..numNodes-1 {
+            nodes[i].radioOut++ --> nodes[j].radioIn++ if
+                topologyMode == "full" && i != j;
 
-        nodes[1].radioOut++ --> nodes[3].radioIn++;
-        nodes[3].radioOut++ --> nodes[1].radioIn++;
+            nodes[i].radioOut++ --> nodes[j].radioIn++ if
+                topologyMode == "line" &&
+                (j == i + 1 || j == i - 1);
 
-        nodes[3].radioOut++ --> nodes[4].radioIn++;
-        nodes[4].radioOut++ --> nodes[3].radioIn++;
+            nodes[i].radioOut++ --> nodes[j].radioIn++ if
+                topologyMode == "ring" &&
+                (j == i + 1 || j == i - 1 ||
+                 (i == 0 && j == numNodes - 1) ||
+                 (i == numNodes - 1 && j == 0));
 
-        nodes[3].radioOut++ --> nodes[5].radioIn++;
-        nodes[5].radioOut++ --> nodes[3].radioIn++;
+            nodes[i].radioOut++ --> nodes[j].radioIn++ if
+                topologyMode == "star" &&
+                ((i == 0 && j != 0) || (j == 0 && i != 0));
 
-        nodes[1].radioOut++ --> nodes[6].radioIn++;
-        nodes[6].radioOut++ --> nodes[1].radioIn++;
+            nodes[i].radioOut++ --> nodes[j].radioIn++ if
+                topologyMode == "grid" &&
+                ((j == i + 1 && (i + 1) % gridCols != 0) ||
+                 (j == i - 1 && i % gridCols != 0) ||
+                 j == i + gridCols ||
+                 j == i - gridCols);
 
-        nodes[6].radioOut++ --> nodes[7].radioIn++;
-        nodes[7].radioOut++ --> nodes[6].radioIn++;
-
-        nodes[6].radioOut++ --> nodes[8].radioIn++;
-        nodes[8].radioOut++ --> nodes[6].radioIn++;
-
-        nodes[0].radioOut++ --> nodes[8].radioIn++;
-        nodes[8].radioOut++ --> nodes[0].radioIn++;
-
+            nodes[i].radioOut++ --> nodes[j].radioIn++ if
+                topologyMode == "clustered" && i != j &&
+                (((i < numNodes / 2) && (j < numNodes / 2)) ||
+                 ((i >= numNodes / 2) && (j >= numNodes / 2)) ||
+                 (i == numNodes / 2 - 1 && j == numNodes / 2) ||
+                 (i == numNodes / 2 && j == numNodes / 2 - 1));
+        }
 }

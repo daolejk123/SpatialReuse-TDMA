@@ -12,8 +12,9 @@
 #   ./scripts/ablation.sh [--sim_time 15000] [--seeds "1 2 3"] [--groups "baseline D B DB"]
 #                        [--num_slots 10] [--num_nodes 9] [--heur_coef 0.01]
 #                        [--idle_queue_penalty 0.05]
+#                        [--topology_mode ring] [--grid_cols 3]
 #                        [--metrics_mode full|summary|off] [--save_every 5000]
-#                        [--jobs 2]
+#                        [--jobs 2] [--root_log logs/custom]
 #                        [--dry_run]
 # =============================================================================
 set -e
@@ -33,6 +34,9 @@ IDLE_QUEUE_PENALTY=""
 METRICS_MODE="full"
 SAVE_EVERY=""
 JOBS=1
+TOPOLOGY_MODE=""
+GRID_COLS=""
+ROOT_LOG=""
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -44,9 +48,12 @@ while [[ $# -gt 0 ]]; do
         --num_nodes)  NUM_NODES="$2";  shift 2 ;;
         --heur_coef)  HEUR_COEF="$2";  shift 2 ;;
         --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
+        --topology_mode) TOPOLOGY_MODE="$2"; shift 2 ;;
+        --grid_cols) GRID_COLS="$2"; shift 2 ;;
         --metrics_mode) METRICS_MODE="$2"; shift 2 ;;
         --save_every) SAVE_EVERY="$2"; shift 2 ;;
         --jobs) JOBS="$2"; shift 2 ;;
+        --root_log) ROOT_LOG="$2"; shift 2 ;;
         --dry_run)    DRY_RUN=true;    shift ;;
         --help|-h)    grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "[ERROR] 未知参数: $1" >&2; exit 1 ;;
@@ -68,6 +75,12 @@ if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
     error "jobs 必须是正整数，当前: $JOBS"
     exit 1
 fi
+if [ -n "$TOPOLOGY_MODE" ]; then
+    case "$TOPOLOGY_MODE" in
+        line|ring|star|grid|clustered|full) ;;
+        *) error "topology_mode 只能是 line、ring、star、grid、clustered 或 full，当前: $TOPOLOGY_MODE"; exit 1 ;;
+    esac
+fi
 
 # ---- 状态保存：omnetpp.ini 备份 + 恢复 ----
 INI_BACKUP=$(mktemp "$PROJECT_DIR/.ablation_ini_backup_XXXXXX")
@@ -86,7 +99,9 @@ trap 'warn "收到 Ctrl+C，保存当前进度后退出"; exit 130' INT TERM
 
 # ---- 结果根目录 ----
 TS=$(date +%Y%m%d_%H%M%S)
-ROOT_LOG="$PROJECT_DIR/logs/ablation_${TS}"
+if [ -z "$ROOT_LOG" ]; then
+    ROOT_LOG="$PROJECT_DIR/logs/ablation_${TS}"
+fi
 mkdir -p "$ROOT_LOG"
 info "结果目录: $ROOT_LOG"
 
@@ -96,6 +111,9 @@ NUM_ABL_GROUPS=$(echo "$ABL_GROUPS" | wc -w)
 TOTAL_RUNS=$((NUM_SEEDS * NUM_ABL_GROUPS))
 info "消融计划: ${NUM_ABL_GROUPS} 组 × ${NUM_SEEDS} seed = ${TOTAL_RUNS} 次运行"
 info "每次: sim-time-limit = ${SIM_TIME}s"
+info "num_nodes = ${NUM_NODES}, num_slots = ${NUM_SLOTS}"
+[ -n "$TOPOLOGY_MODE" ] && info "topology_mode = ${TOPOLOGY_MODE}"
+[ -n "$GRID_COLS" ] && info "grid_cols = ${GRID_COLS}"
 info "启用 B 时的 heur_deviation_coef = ${HEUR_COEF}"
 [ -n "$IDLE_QUEUE_PENALTY" ] && info "idle_queue_penalty = ${IDLE_QUEUE_PENALTY}"
 info "metrics_mode = ${METRICS_MODE}"
@@ -126,6 +144,8 @@ run_one() {
     if [ "$DRY_RUN" = true ]; then
         info "[DRY] run_joint.sh --num_slots $NUM_SLOTS --num_nodes $NUM_NODES \\"
         info "                   --sim_time $SIM_TIME --seed $seed --adaptive_multiplier $ADAPTIVE \\"
+        [ -n "$TOPOLOGY_MODE" ] && info "                   --topology_mode $TOPOLOGY_MODE \\"
+        [ -n "$GRID_COLS" ] && info "                   --grid_cols $GRID_COLS \\"
         info "                   --heur_deviation_coef $HDEV --metrics_mode $METRICS_MODE \\"
         [ -n "$IDLE_QUEUE_PENALTY" ] && info "                   --idle_queue_penalty $IDLE_QUEUE_PENALTY \\"
         [ -n "$SAVE_EVERY" ] && info "                   --save_every $SAVE_EVERY \\"
@@ -146,6 +166,9 @@ run_one() {
     [ -n "$IDLE_QUEUE_PENALTY" ] && IDLE_ARGS=(--idle_queue_penalty "$IDLE_QUEUE_PENALTY")
     local SAVE_ARGS=()
     [ -n "$SAVE_EVERY" ] && SAVE_ARGS=(--save_every "$SAVE_EVERY")
+    local TOPOLOGY_ARGS=()
+    [ -n "$TOPOLOGY_MODE" ] && TOPOLOGY_ARGS+=(--topology_mode "$TOPOLOGY_MODE")
+    [ -n "$GRID_COLS" ] && TOPOLOGY_ARGS+=(--grid_cols "$GRID_COLS")
     local PIPE_SUFFIX
     PIPE_SUFFIX="$(printf '%s_seed%s_%s' "$group" "$seed" "$$" | tr -c 'A-Za-z0-9_' '_')"
     local STATE_PIPE="/tmp/tdma_rl_state_${PIPE_SUFFIX}"
@@ -160,6 +183,7 @@ run_one() {
         --seed "$seed" \
         --adaptive_multiplier "$ADAPTIVE" \
         --record_eventlog false \
+        "${TOPOLOGY_ARGS[@]}" \
         --heur_deviation_coef "$HDEV" \
         "${IDLE_ARGS[@]}" \
         "${SAVE_ARGS[@]}" \
@@ -180,6 +204,10 @@ run_one() {
         echo "group=$group"
         echo "seed=$seed"
         echo "wall_seconds=$DT"
+        echo "num_nodes=$NUM_NODES"
+        echo "num_slots=$NUM_SLOTS"
+        [ -n "$TOPOLOGY_MODE" ] && echo "topology_mode=$TOPOLOGY_MODE"
+        [ -n "$GRID_COLS" ] && echo "grid_cols=$GRID_COLS"
         echo "state_pipe=$STATE_PIPE"
         echo "action_pipe=$ACTION_PIPE"
         [ -f "$LOG_DIR/python.log" ] && grep -E '^\[PPO\]' "$LOG_DIR/python.log" | tail -1 | sed 's/^/last_ppo=/'

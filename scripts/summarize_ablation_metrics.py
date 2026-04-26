@@ -25,6 +25,9 @@ PPO_RE = re.compile(
 GROUP_ORDER = ["baseline", "D", "B", "DB"]
 
 RUN_FIELDS = [
+    "scenario",
+    "num_nodes",
+    "topology_mode",
     "group",
     "seed",
     "complete",
@@ -66,6 +69,8 @@ SUMMARY_METRICS = [
     "slot_util_mean",
     "ctrl_collision_mean",
 ]
+
+SCENARIO_RE = re.compile(r"^N(?P<num_nodes>\d+)_(?P<topology>.+)$")
 
 
 def fnum(value: str | float | int | None) -> float:
@@ -179,25 +184,75 @@ def summarize_frame_metrics(path: Path) -> dict[str, float]:
     }
 
 
-def discover_runs(root: Path) -> Iterable[tuple[str, int, Path]]:
+def read_run_perf(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        out[key.strip()] = value.strip()
+    return out
+
+
+def scenario_meta(scenario: str, run_dir: Path) -> dict[str, object]:
+    perf = read_run_perf(run_dir / "run_perf.txt")
+    meta: dict[str, object] = {
+        "scenario": scenario,
+        "num_nodes": perf.get("num_nodes", ""),
+        "topology_mode": perf.get("topology_mode", ""),
+    }
+    m = SCENARIO_RE.match(scenario)
+    if m:
+        meta["num_nodes"] = meta["num_nodes"] or m.group("num_nodes")
+        meta["topology_mode"] = meta["topology_mode"] or m.group("topology")
+    return meta
+
+
+def seed_key(path: Path) -> int:
+    text = path.name.replace("seed", "")
+    return int(text) if text.isdigit() else 0
+
+
+def group_key(path: Path | str) -> int:
+    name = path.name if isinstance(path, Path) else path
+    return GROUP_ORDER.index(name) if name in GROUP_ORDER else 99
+
+
+def discover_runs(root: Path) -> Iterable[tuple[str, str, int, Path]]:
     for group_dir in sorted(root.iterdir(), key=lambda p: GROUP_ORDER.index(p.name) if p.name in GROUP_ORDER else 99):
         if not group_dir.is_dir():
             continue
-        for seed_dir in sorted(group_dir.glob("seed*"), key=lambda p: int(p.name.replace("seed", "") or 0)):
-            seed_text = seed_dir.name.replace("seed", "")
-            if not seed_text.isdigit():
+        if group_dir.name in GROUP_ORDER:
+            for seed_dir in sorted(group_dir.glob("seed*"), key=seed_key):
+                seed_text = seed_dir.name.replace("seed", "")
+                if not seed_text.isdigit():
+                    continue
+                yield "", group_dir.name, int(seed_text), seed_dir
+            continue
+
+        scenario = group_dir.name
+        for nested_group in sorted(group_dir.iterdir(), key=group_key):
+            if not nested_group.is_dir() or nested_group.name not in GROUP_ORDER:
                 continue
-            yield group_dir.name, int(seed_text), seed_dir
+            for seed_dir in sorted(nested_group.glob("seed*"), key=seed_key):
+                seed_text = seed_dir.name.replace("seed", "")
+                if not seed_text.isdigit():
+                    continue
+                yield scenario, nested_group.name, int(seed_text), seed_dir
 
 
-def summarize_run(group: str, seed: int, run_dir: Path) -> dict[str, object]:
+def summarize_run(scenario: str, group: str, seed: int, run_dir: Path) -> dict[str, object]:
     metrics_dir = run_dir / "metrics"
     row: dict[str, object] = {
+        "scenario": scenario,
         "group": group,
         "seed": seed,
         "complete": False,
         "metrics_dir": str(metrics_dir),
     }
+    row.update(scenario_meta(scenario, run_dir))
     row.update(last_ppo(run_dir / "python.log"))
     row.update(summarize_slot_stats(metrics_dir / "slot_stats.csv"))
     row.update(summarize_fairness(metrics_dir / "fairness.csv"))
@@ -208,7 +263,7 @@ def summarize_run(group: str, seed: int, run_dir: Path) -> dict[str, object]:
         sim_completed(run_dir / "sim.log")
         and float(row.get("ppo_frame", 0.0)) > 0.0
         and float(row.get("ppo_update", 0.0)) > 0.0
-        and row.get("slot_final_nodes") == 9.0
+        and float(row.get("slot_final_nodes", 0.0)) > 0.0
         and final_frame == row.get("fairness_final_frame")
         and final_frame == row.get("frame_metrics_final_frame")
     )
@@ -239,6 +294,28 @@ def group_summary(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     return output
 
 
+def scenario_summary(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    keys = sorted({(str(r.get("scenario", "")), str(r["group"])) for r in rows})
+    for scenario, group in keys:
+        scenario_rows = [r for r in rows if str(r.get("scenario", "")) == scenario and str(r["group"]) == group]
+        first = scenario_rows[0]
+        out: dict[str, object] = {
+            "scenario": scenario,
+            "num_nodes": first.get("num_nodes", ""),
+            "topology_mode": first.get("topology_mode", ""),
+            "group": group,
+            "runs": len(scenario_rows),
+            "complete_runs": sum(1 for r in scenario_rows if r["complete"]),
+        }
+        for metric in SUMMARY_METRICS:
+            mean, std = mean_std([float(r.get(metric, math.nan)) for r in scenario_rows])
+            out[f"{metric}_mean"] = mean
+            out[f"{metric}_std"] = std
+        output.append(out)
+    return output
+
+
 def write_csv(path: Path, rows: list[dict[str, object]], fields: list[str]) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
@@ -249,6 +326,7 @@ def write_csv(path: Path, rows: list[dict[str, object]], fields: list[str]) -> N
 
 def print_markdown(summary_rows: list[dict[str, object]]) -> None:
     headers = [
+        "场景",
         "组",
         "完整run",
         "avg_r",
@@ -265,6 +343,7 @@ def print_markdown(summary_rows: list[dict[str, object]]) -> None:
             "| "
             + " | ".join(
                 [
+                    str(row.get("scenario", "")),
                     str(row["group"]),
                     f"{row['complete_runs']}/{row['runs']}",
                     f"{fmt(float(row['avg_r_mean']), 3)} ± {fmt(float(row['avg_r_std']), 3)}",
@@ -286,7 +365,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = args.root.resolve()
-    rows = [summarize_run(group, seed, run_dir) for group, seed, run_dir in discover_runs(root)]
+    rows = [summarize_run(scenario, group, seed, run_dir) for scenario, group, seed, run_dir in discover_runs(root)]
     if not rows:
         raise SystemExit(f"No runs found under {root}")
 
@@ -297,8 +376,14 @@ def main() -> int:
         summary_fields.extend([f"{metric}_mean", f"{metric}_std"])
     write_csv(root / "metrics_group_summary.csv", summary_rows, summary_fields)
 
+    scenario_rows = scenario_summary(rows)
+    scenario_fields = ["scenario", "num_nodes", "topology_mode", "group", "runs", "complete_runs"]
+    for metric in SUMMARY_METRICS:
+        scenario_fields.extend([f"{metric}_mean", f"{metric}_std"])
+    write_csv(root / "metrics_scenario_summary.csv", scenario_rows, scenario_fields)
+
     if not args.no_markdown:
-        print_markdown(summary_rows)
+        print_markdown(scenario_rows if any(r.get("scenario") for r in rows) else summary_rows)
     return 0
 
 
