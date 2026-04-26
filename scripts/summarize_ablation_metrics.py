@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import math
 import re
@@ -43,12 +44,25 @@ RUN_FIELDS = [
     "total_requests",
     "tx_success_rate",
     "packets_per_frame",
+    "goodput_per_slot",
+    "packet_delivery_ratio",
+    "drop_or_backlog_rate",
+    "mac_efficiency",
+    "concurrent_success_degree",
+    "spatial_reuse_gain",
     "jain_tx_mean",
     "jain_tx_tail100",
     "queue_tail100",
+    "queue_stability_slope",
     "request_rate_mean",
     "slot_util_mean",
     "ctrl_collision_mean",
+    "control_pressure",
+    "req_pressure_mean",
+    "Wt_p95",
+    "fair_goodput",
+    "starvation_ratio",
+    "energy_proxy",
     "metrics_dir",
 ]
 
@@ -62,12 +76,25 @@ SUMMARY_METRICS = [
     "total_requests",
     "tx_success_rate",
     "packets_per_frame",
+    "goodput_per_slot",
+    "packet_delivery_ratio",
+    "drop_or_backlog_rate",
+    "mac_efficiency",
+    "concurrent_success_degree",
+    "spatial_reuse_gain",
     "jain_tx_mean",
     "jain_tx_tail100",
     "queue_tail100",
+    "queue_stability_slope",
     "request_rate_mean",
     "slot_util_mean",
     "ctrl_collision_mean",
+    "control_pressure",
+    "req_pressure_mean",
+    "Wt_p95",
+    "fair_goodput",
+    "starvation_ratio",
+    "energy_proxy",
 ]
 
 SCENARIO_RE = re.compile(r"^N(?P<num_nodes>\d+)_(?P<topology>.+)$")
@@ -96,6 +123,35 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
+def percentile(values: list[float], pct: float) -> float:
+    vals = sorted(v for v in values if not math.isnan(v))
+    if not vals:
+        return math.nan
+    if len(vals) == 1:
+        return vals[0]
+    rank = (len(vals) - 1) * pct / 100.0
+    low = math.floor(rank)
+    high = math.ceil(rank)
+    if low == high:
+        return vals[int(rank)]
+    frac = rank - low
+    return vals[low] * (1.0 - frac) + vals[high] * frac
+
+
+def linear_slope(points: list[tuple[float, float]]) -> float:
+    clean = [(x, y) for x, y in points if not math.isnan(x) and not math.isnan(y)]
+    if len(clean) < 2:
+        return math.nan
+    xs = [p[0] for p in clean]
+    ys = [p[1] for p in clean]
+    x_mean = statistics.fmean(xs)
+    y_mean = statistics.fmean(ys)
+    denom = sum((x - x_mean) ** 2 for x in xs)
+    if denom == 0:
+        return math.nan
+    return sum((x - x_mean) * (y - y_mean) for x, y in clean) / denom
+
+
 def last_ppo(path: Path) -> dict[str, float]:
     last: dict[str, float] | None = None
     if not path.exists():
@@ -122,17 +178,49 @@ def sim_completed(path: Path) -> bool:
     return "Simulation time limit reached" in text and "End." in text
 
 
-def summarize_slot_stats(path: Path) -> dict[str, float]:
+def summarize_slot_stats(path: Path, num_slots: float = math.nan, total_arrivals: float = math.nan) -> dict[str, float]:
     if not path.exists():
         return {}
-    rows = read_csv(path)
-    if not rows:
+    final_frame = 0
+    last: list[dict[str, str]] = []
+    generated_cols: list[str] | None = None
+    tail_by_node: dict[str, collections.deque[tuple[int, float]]] = collections.defaultdict(lambda: collections.deque(maxlen=101))
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if generated_cols is None:
+                generated_cols = [k for k in row if k.startswith("totalGenerated")]
+            frame = int(float(row["frame"]))
+            if frame > final_frame:
+                final_frame = frame
+                last = [row]
+            elif frame == final_frame:
+                last.append(row)
+            tail_by_node[row["nodeId"]].append((frame, fnum(row["totalSuccessfulPackets"])))
+    if not last:
         return {}
-    final_frame = max(int(float(r["frame"])) for r in rows)
-    last = [r for r in rows if int(float(r["frame"])) == final_frame]
     total_packets = sum(fnum(r["totalSuccessfulPackets"]) for r in last)
     total_tx = sum(fnum(r["totalSuccessfulTx"]) for r in last)
     total_requests = sum(fnum(r["totalSlotRequests"]) for r in last)
+    if math.isnan(total_arrivals):
+        generated_cols = generated_cols or []
+        total_arrivals = sum(fnum(r[col]) for r in last for col in generated_cols)
+    tail_start = max(0, final_frame - 100)
+    starved = 0
+    for node_rows in tail_by_node.values():
+        ordered = [(frame, packets) for frame, packets in node_rows if frame >= tail_start]
+        if not ordered:
+            continue
+        first = ordered[0][1]
+        last_packets = ordered[-1][1]
+        if last_packets - first <= 0:
+            starved += 1
+    final_nodes = len(last)
+    goodput_per_slot = (
+        total_packets / (final_frame * num_slots)
+        if final_frame and num_slots and not math.isnan(num_slots)
+        else math.nan
+    )
     return {
         "final_frame": float(final_frame),
         "total_packets": total_packets,
@@ -140,47 +228,90 @@ def summarize_slot_stats(path: Path) -> dict[str, float]:
         "total_requests": total_requests,
         "tx_success_rate": total_tx / total_requests if total_requests else math.nan,
         "packets_per_frame": total_packets / final_frame if final_frame else math.nan,
-        "slot_final_nodes": float(len(last)),
+        "goodput_per_slot": goodput_per_slot,
+        "packet_delivery_ratio": total_packets / total_arrivals if total_arrivals else math.nan,
+        "mac_efficiency": total_packets / total_requests if total_requests else math.nan,
+        "starvation_ratio": starved / final_nodes if final_nodes else math.nan,
+        "slot_final_nodes": float(final_nodes),
     }
 
 
 def summarize_fairness(path: Path) -> dict[str, float]:
     if not path.exists():
         return {}
-    rows = read_csv(path)
-    if not rows:
+    count = 0
+    jain_sum = 0.0
+    total_arrivals = 0.0
+    total_delta_packets = 0.0
+    tail: collections.deque[dict[str, str]] = collections.deque(maxlen=100)
+    last_row: dict[str, str] | None = None
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            count += 1
+            jain_sum += fnum(row["jain_tx"])
+            total_arrivals += fnum(row["sum_arrivals"])
+            total_delta_packets += fnum(row["sum_delta_packets"])
+            tail.append(row)
+            last_row = row
+    if not last_row:
         return {}
-    jain = [fnum(r["jain_tx"]) for r in rows]
-    queues = [fnum(r["sum_queue"]) for r in rows]
-    tail = rows[-100:]
+    queue_tail100 = statistics.fmean(fnum(r["sum_queue"]) for r in tail)
+    final_queue = fnum(last_row["sum_queue"])
     return {
-        "fairness_final_frame": fnum(rows[-1]["frame"]),
-        "jain_tx_mean": statistics.fmean(jain),
+        "fairness_final_frame": fnum(last_row["frame"]),
+        "jain_tx_mean": jain_sum / count if count else math.nan,
         "jain_tx_tail100": statistics.fmean(fnum(r["jain_tx"]) for r in tail),
-        "queue_tail100": statistics.fmean(fnum(r["sum_queue"]) for r in tail),
-        "fairness_rows": float(len(rows)),
+        "queue_tail100": queue_tail100,
+        "queue_stability_slope": linear_slope([(fnum(r["frame"]), fnum(r["sum_queue"])) for r in tail]),
+        "total_arrivals": total_arrivals,
+        "total_delta_packets": total_delta_packets,
+        "final_queue": final_queue,
+        "fairness_rows": float(count),
     }
 
 
 def summarize_frame_metrics(path: Path) -> dict[str, float]:
     if not path.exists():
         return {}
-    rows = read_csv(path)
-    if not rows:
+    count = 0
+    req_sent = 0.0
+    req_candidates = 0.0
+    ctrl_sum = 0.0
+    wt_values: list[float] = []
+    num_slots = math.nan
+    util_sum = 0.0
+    util_count = 0
+    last_row: dict[str, str] | None = None
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            count += 1
+            req_sent += fnum(row["req_sent"])
+            req_candidates += fnum(row["req_candidates"])
+            ctrl_sum += fnum(row["Cctrl"])
+            wt_values.append(fnum(row["Wt"]))
+            if row.get("Bown"):
+                num_slots = max(num_slots if not math.isnan(num_slots) else 0.0, float(len(row["Bown"])))
+                util_sum += row["Bown"].count("1")
+                util_count += 1
+            last_row = row
+    if not last_row:
         return {}
-    req_sent = sum(fnum(r["req_sent"]) for r in rows)
-    req_candidates = sum(fnum(r["req_candidates"]) for r in rows)
-    bown_lengths = [len(r["Bown"]) for r in rows if r.get("Bown")]
-    num_slots = max(bown_lengths) if bown_lengths else math.nan
-    util_values = []
-    if num_slots and not math.isnan(num_slots):
-        util_values = [r["Bown"].count("1") / num_slots for r in rows if r.get("Bown")]
+    slot_util_mean = (util_sum / util_count / num_slots) if util_count and num_slots and not math.isnan(num_slots) else math.nan
+    ctrl_collision_mean = ctrl_sum / count if count else math.nan
+    req_pressure_mean = req_sent / (count * num_slots) if count and num_slots and not math.isnan(num_slots) else math.nan
+    control_pressure = ctrl_collision_mean / num_slots if num_slots and not math.isnan(num_slots) else math.nan
     return {
-        "frame_metrics_final_frame": fnum(rows[-1]["frame"]),
+        "frame_metrics_final_frame": fnum(last_row["frame"]),
         "request_rate_mean": req_sent / req_candidates if req_candidates else math.nan,
-        "slot_util_mean": statistics.fmean(util_values) if util_values else math.nan,
-        "ctrl_collision_mean": statistics.fmean(fnum(r["Cctrl"]) for r in rows),
-        "frame_metrics_rows": float(len(rows)),
+        "slot_util_mean": slot_util_mean,
+        "ctrl_collision_mean": ctrl_collision_mean,
+        "control_pressure": control_pressure,
+        "req_pressure_mean": req_pressure_mean,
+        "Wt_p95": percentile(wt_values, 95),
+        "num_data_slots": num_slots,
+        "frame_metrics_rows": float(count),
     }
 
 
@@ -254,9 +385,33 @@ def summarize_run(scenario: str, group: str, seed: int, run_dir: Path) -> dict[s
     }
     row.update(scenario_meta(scenario, run_dir))
     row.update(last_ppo(run_dir / "python.log"))
-    row.update(summarize_slot_stats(metrics_dir / "slot_stats.csv"))
-    row.update(summarize_fairness(metrics_dir / "fairness.csv"))
     row.update(summarize_frame_metrics(metrics_dir / "frame_metrics.csv"))
+    row.update(summarize_fairness(metrics_dir / "fairness.csv"))
+    row.update(
+        summarize_slot_stats(
+            metrics_dir / "slot_stats.csv",
+            num_slots=float(row.get("num_data_slots", math.nan)),
+            total_arrivals=float(row.get("total_arrivals", math.nan)),
+        )
+    )
+
+    goodput = float(row.get("goodput_per_slot", math.nan))
+    jain_tail = float(row.get("jain_tx_tail100", math.nan))
+    final_queue = float(row.get("final_queue", math.nan))
+    total_arrivals = float(row.get("total_arrivals", math.nan))
+    slot_util = float(row.get("slot_util_mean", math.nan))
+    control_pressure = float(row.get("control_pressure", math.nan))
+    req_pressure = float(row.get("req_pressure_mean", math.nan))
+    if not math.isnan(goodput) and not math.isnan(jain_tail):
+        row["fair_goodput"] = goodput * jain_tail
+    if total_arrivals:
+        row["drop_or_backlog_rate"] = final_queue / total_arrivals if not math.isnan(final_queue) else math.nan
+    if not math.isnan(goodput) and not math.isnan(slot_util) and slot_util > 0:
+        row["concurrent_success_degree"] = goodput / slot_util
+    if not math.isnan(req_pressure) or not math.isnan(control_pressure) or not math.isnan(slot_util):
+        row["energy_proxy"] = sum(
+            v for v in [req_pressure, control_pressure, slot_util] if not math.isnan(v)
+        )
 
     final_frame = row.get("final_frame")
     complete = (
@@ -291,6 +446,7 @@ def group_summary(rows: list[dict[str, object]]) -> list[dict[str, object]]:
             out[f"{metric}_mean"] = mean
             out[f"{metric}_std"] = std
         output.append(out)
+    attach_spatial_reuse_gain(output)
     return output
 
 
@@ -313,7 +469,27 @@ def scenario_summary(rows: list[dict[str, object]]) -> list[dict[str, object]]:
             out[f"{metric}_mean"] = mean
             out[f"{metric}_std"] = std
         output.append(out)
+    attach_spatial_reuse_gain(output)
     return output
+
+
+def attach_spatial_reuse_gain(summary_rows: list[dict[str, object]]) -> None:
+    baselines: dict[str, float] = {}
+    for row in summary_rows:
+        scenario = str(row.get("scenario", ""))
+        if row.get("group") == "baseline":
+            baselines[scenario] = float(row.get("goodput_per_slot_mean", math.nan))
+    if "" not in baselines:
+        baseline_rows = [row for row in summary_rows if row.get("group") == "baseline"]
+        if baseline_rows:
+            baselines[""] = float(baseline_rows[0].get("goodput_per_slot_mean", math.nan))
+    for row in summary_rows:
+        scenario = str(row.get("scenario", ""))
+        base = baselines.get(scenario, baselines.get("", math.nan))
+        goodput = float(row.get("goodput_per_slot_mean", math.nan))
+        gain = goodput / base if base and not math.isnan(base) else math.nan
+        row["spatial_reuse_gain_mean"] = gain
+        row["spatial_reuse_gain_std"] = math.nan
 
 
 def write_csv(path: Path, rows: list[dict[str, object]], fields: list[str]) -> None:
@@ -331,6 +507,11 @@ def print_markdown(summary_rows: list[dict[str, object]]) -> None:
         "完整run",
         "avg_r",
         "packets/frame",
+        "goodput/slot",
+        "PDR",
+        "queue_slope",
+        "Wt_P95",
+        "starvation",
         "tx_success",
         "Jain尾100",
         "queue尾100",
@@ -348,6 +529,11 @@ def print_markdown(summary_rows: list[dict[str, object]]) -> None:
                     f"{row['complete_runs']}/{row['runs']}",
                     f"{fmt(float(row['avg_r_mean']), 3)} ± {fmt(float(row['avg_r_std']), 3)}",
                     f"{fmt(float(row['packets_per_frame_mean']), 3)} ± {fmt(float(row['packets_per_frame_std']), 3)}",
+                    f"{fmt(float(row.get('goodput_per_slot_mean', math.nan)), 4)}",
+                    f"{fmt(float(row.get('packet_delivery_ratio_mean', math.nan)), 4)}",
+                    f"{fmt(float(row.get('queue_stability_slope_mean', math.nan)), 4)}",
+                    f"{fmt(float(row.get('Wt_p95_mean', math.nan)), 4)}",
+                    f"{fmt(float(row.get('starvation_ratio_mean', math.nan)), 4)}",
                     f"{fmt(float(row['tx_success_rate_mean']), 4)}",
                     f"{fmt(float(row['jain_tx_tail100_mean']), 4)}",
                     f"{fmt(float(row['queue_tail100_mean']), 2)}",
