@@ -1,0 +1,6 @@
+method	implementation	network	runner	macMode	adapter	needs_rl	description
+baseline	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	current heuristic/PPO baseline path
+B	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	current B mainline path
+D	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	adaptive multiplier ablation path
+DB	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	combined D and B ablation path
+external	external	-	external	-	canonical	false	placeholder for manually imported literature results
