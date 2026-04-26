@@ -27,7 +27,12 @@
 #   --heur_deviation_coef F  方向B 软正则系数（默认 0=禁用，建议 0.005~0.02）
 #   --idle_queue_penalty F   有队列但未申请时隙的惩罚（默认 0=禁用，建议 0.05）
 #   --save_every N       每 N 帧保存一次 checkpoint（默认使用训练器默认值）
+#   --target_updates N   达到 N 次 PPO 更新后正常停止（默认 0=禁用）
+#   --target_frames N    达到 N 帧后正常停止（默认 0=禁用）
+#   --receiver_buffer_size N Python 状态接收缓冲帧数（target 实验默认 64）
+#   --stale_timeout N    日志 N 秒无更新则判定卡死（默认 300）
 #   --seed N             随机种子（-1=不设置；>=0 公平比较消融用）
+#   --group NAME         实验组名（仅用于 run_status）
 #   --metrics_dir DIR    网络指标输出目录（默认使用 results/ 下的时间戳文件）
 #   --metrics_mode MODE  full|summary|off（默认 full）
 #   --state_pipe PATH    C++→Python 状态 FIFO 路径（默认 /tmp/tdma_rl_state）
@@ -89,7 +94,12 @@ BC_LR=""
 HEUR_DEVIATION_COEF=""
 IDLE_QUEUE_PENALTY=""
 SAVE_EVERY=""
+TARGET_UPDATES=""
+TARGET_FRAMES=""
+RECEIVER_BUFFER_SIZE=""
+STALE_TIMEOUT=300
 SEED=""
+GROUP=""
 SAVE_DIR=""
 METRICS_DIR=""
 METRICS_MODE="full"
@@ -126,7 +136,12 @@ while [[ $# -gt 0 ]]; do
         --heur_deviation_coef) HEUR_DEVIATION_COEF="$2"; shift 2 ;;
         --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
         --save_every)   SAVE_EVERY="$2"; shift 2 ;;
+        --target_updates) TARGET_UPDATES="$2"; shift 2 ;;
+        --target_frames) TARGET_FRAMES="$2"; shift 2 ;;
+        --receiver_buffer_size) RECEIVER_BUFFER_SIZE="$2"; shift 2 ;;
+        --stale_timeout) STALE_TIMEOUT="$2"; shift 2 ;;
         --seed)         SEED="$2";       shift 2 ;;
+        --group)        GROUP="$2";      shift 2 ;;
         --save_dir)     SAVE_DIR="$2";   shift 2 ;;
         --metrics_dir)  METRICS_DIR="$2"; shift 2 ;;
         --metrics_mode) METRICS_MODE="$2"; shift 2 ;;
@@ -246,6 +261,10 @@ info "action_pipe  = $ACTION_PIPE"
 [ -n "$R_GAMMA" ]     && info "r_gamma      = $R_GAMMA"
 [ -n "$UPDATE_EVERY" ] && info "update_every = $UPDATE_EVERY"
 [ -n "$SAVE_EVERY" ] && info "save_every   = $SAVE_EVERY"
+[ -n "$TARGET_UPDATES" ] && info "target_updates = $TARGET_UPDATES"
+[ -n "$TARGET_FRAMES" ] && info "target_frames  = $TARGET_FRAMES"
+[ -n "$RECEIVER_BUFFER_SIZE" ] && info "receiver_buffer_size = $RECEIVER_BUFFER_SIZE"
+info "stale_timeout = ${STALE_TIMEOUT}s"
 [ -n "$IDLE_QUEUE_PENALTY" ] && info "idle_queue_penalty = $IDLE_QUEUE_PENALTY"
 
 if [ "$SYNC_INTERVAL" -gt 0 ] 2>/dev/null; then
@@ -260,20 +279,118 @@ PYTHON_PID=""
 SIM_PID=""
 TEMP_INI=""
 RUN_START_TS=$(date +%s)
+RUN_STATUS="$LOG_DIR/run_status.tsv"
+RUN_EXIT_CODE=0
+RUN_STATUS_VALUE="starting"
+RUN_MESSAGE="initializing"
+
+last_ppo_line() {
+    [ -f "$LOG_DIR/python.log" ] || return 0
+    grep -E '^\[PPO\]' "$LOG_DIR/python.log" | tail -1 || true
+}
+
+extract_ppo_field() {
+    local line="$1" field="$2"
+    case "$field" in
+        frame) echo "$line" | sed -nE 's/.*frame= *([0-9]+).*/\1/p' ;;
+        update) echo "$line" | sed -nE 's/.*update= *([0-9]+).*/\1/p' ;;
+        avg_r) echo "$line" | sed -nE 's/.*avg_r= *([^ ]+).*/\1/p' ;;
+        entropy) echo "$line" | sed -nE 's/.*entropy=([^ ]+).*/\1/p' ;;
+    esac
+}
+
+file_age_sec() {
+    local path="$1"
+    if [ ! -e "$path" ]; then
+        echo 999999
+        return
+    fi
+    echo $(( $(date +%s) - $(stat -c %Y "$path" 2>/dev/null || echo 0) ))
+}
+
+target_reached() {
+    [ -f "$LOG_DIR/python.log" ] || return 1
+    grep -qE '\[PPO\] target_(updates|frames) reached:' "$LOG_DIR/python.log"
+}
+
+sim_completed() {
+    [ -f "$LOG_DIR/sim.log" ] || return 1
+    grep -q 'Simulation time limit reached' "$LOG_DIR/sim.log" && grep -q 'End\.' "$LOG_DIR/sim.log"
+}
+
+write_status() {
+    [ "$DRY_RUN" = true ] && return
+    local status="$1" exit_code="${2:-}" message="${3:-}"
+    mkdir -p "$LOG_DIR"
+    local now ppo frame update avg_r entropy sim_speed age_py age_sim
+    now=$(date +%s)
+    ppo="$(last_ppo_line)"
+    frame="$(extract_ppo_field "$ppo" frame)"
+    update="$(extract_ppo_field "$ppo" update)"
+    avg_r="$(extract_ppo_field "$ppo" avg_r)"
+    entropy="$(extract_ppo_field "$ppo" entropy)"
+    sim_speed=""
+    [ -f "$LOG_DIR/sim.log" ] && sim_speed="$(grep -E 'Speed:' "$LOG_DIR/sim.log" | tail -1 | sed 's/^[[:space:]]*//')"
+    age_py="$(file_age_sec "$LOG_DIR/python.log")"
+    age_sim="$(file_age_sec "$LOG_DIR/sim.log")"
+    {
+        printf 'field\tvalue\n'
+        printf 'group\t%s\n' "${GROUP:-}"
+        printf 'seed\t%s\n' "${SEED:-}"
+        printf 'num_nodes\t%s\n' "$NUM_NODES"
+        printf 'topology_mode\t%s\n' "$TOPOLOGY_MODE"
+        printf 'target_updates\t%s\n' "$TARGET_UPDATES"
+        printf 'target_frames\t%s\n' "$TARGET_FRAMES"
+        printf 'python_pid\t%s\n' "$PYTHON_PID"
+        printf 'sim_pid\t%s\n' "$SIM_PID"
+        printf 'started_at\t%s\n' "$RUN_START_TS"
+        printf 'updated_at\t%s\n' "$now"
+        printf 'last_frame\t%s\n' "$frame"
+        printf 'last_update\t%s\n' "$update"
+        printf 'last_avg_r\t%s\n' "$avg_r"
+        printf 'last_entropy\t%s\n' "$entropy"
+        printf 'age_py\t%s\n' "$age_py"
+        printf 'age_sim\t%s\n' "$age_sim"
+        printf 'last_sim_speed\t%s\n' "$sim_speed"
+        printf 'status\t%s\n' "$status"
+        printf 'exit_code\t%s\n' "$exit_code"
+        printf 'message\t%s\n' "$message"
+    } > "$RUN_STATUS" 2>/dev/null || true
+}
+
+wait_then_kill() {
+    local pid="$1" label="$2" sig="${3:-INT}" grace="${4:-10}"
+    kill "-$sig" "$pid" 2>/dev/null || true
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$grace" ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        warn "$label 未在 ${grace}s 内退出，发送 SIGTERM..."
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 2
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+        warn "$label 仍未退出，发送 SIGKILL..."
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+}
 
 # --------------------------------------------------------------------------
 # 退出清理
 # --------------------------------------------------------------------------
 cleanup() {
     local exit_code=$?
+    [ "$RUN_EXIT_CODE" != "0" ] && exit_code="$RUN_EXIT_CODE"
     echo ""
     section "清理与退出"
 
     # 停止 Python 训练器（用 SIGINT 让 Python finally 块正常保存权重）
     if [ -n "$PYTHON_PID" ] && kill -0 "$PYTHON_PID" 2>/dev/null; then
         info "停止 Python 训练器 (PID $PYTHON_PID)..."
-        kill -INT "$PYTHON_PID" 2>/dev/null
-        wait "$PYTHON_PID" 2>/dev/null || true
+        wait_then_kill "$PYTHON_PID" "Python 训练器" "INT" 10
         info "Python 训练器已退出"
     fi
 
@@ -281,8 +398,7 @@ cleanup() {
     # SIM_PID 指向 tee 进程，pkill 兜底确保 OMNeT++ 本身也被终止
     if [ -n "$SIM_PID" ] && kill -0 "$SIM_PID" 2>/dev/null; then
         info "停止 OMNeT++ 仿真 (PID $SIM_PID)..."
-        kill "$SIM_PID" 2>/dev/null
-        wait "$SIM_PID" 2>/dev/null || true
+        wait_then_kill "$SIM_PID" "OMNeT++ 仿真" "TERM" 5
         info "仿真已退出"
     fi
     [ -n "$TEMP_INI" ] && pkill -f "DynamicTDMA.*$(basename "$TEMP_INI")" 2>/dev/null || true
@@ -307,6 +423,7 @@ cleanup() {
         echo "exit_code=$exit_code"
         [ -f "$LOG_DIR/python.log" ] && grep -E '^\[PPO\]' "$LOG_DIR/python.log" | tail -1 | sed 's/^/last_ppo=/'
         [ -f "$LOG_DIR/sim.log" ] && grep -E 'Speed:' "$LOG_DIR/sim.log" | tail -1 | sed 's/^ *//;s/^/last_sim_speed=/'
+        [ -f "$RUN_STATUS" ] && awk -F '\t' '$1=="status"{print "run_status="$2} $1=="message"{print "run_message="$2}' "$RUN_STATUS"
         [ -n "$METRICS_DIR" ] && [ -d "$METRICS_DIR" ] && du -sh "$METRICS_DIR" | awk '{print "metrics_size="$1}'
         [ -n "$SAVE_DIR" ] && [ -d "$SAVE_DIR" ] && du -sh "$SAVE_DIR" | awk '{print "checkpoint_size="$1}'
     } > "$LOG_DIR/run_perf.txt" 2>/dev/null || true
@@ -314,6 +431,7 @@ cleanup() {
     echo ""
     info "所有日志已保存至: $LOG_DIR"
     info "脚本退出 (exit code: $exit_code)"
+    exit "$exit_code"
 }
 
 trap cleanup EXIT
@@ -343,6 +461,7 @@ info "管道已清理（将由 Python 在启动时重新创建）"
 # --------------------------------------------------------------------------
 run_cmd mkdir -p "$LOG_DIR"
 info "日志目录: $LOG_DIR"
+write_status "starting" "" "log directory initialized"
 
 # --------------------------------------------------------------------------
 # 生成临时 ini（从 omnetpp.ini 复制并用 sed 替换同步参数）
@@ -406,6 +525,7 @@ PPO_CMD=(
     --sync_interval "$SYNC_INTERVAL"
     --sync_timeout  "$SYNC_TIMEOUT"
 )
+[ -z "$RECEIVER_BUFFER_SIZE" ] && [ -n "$TARGET_UPDATES$TARGET_FRAMES" ] && RECEIVER_BUFFER_SIZE=64
 [ -n "$LOAD_CKPT_ARG" ]  && PPO_CMD+=($LOAD_CKPT_ARG)
 [ -n "$ENT_COEF" ]       && PPO_CMD+=(--ent_coef      "$ENT_COEF")
 [ -n "$ENT_COEF_HIGH" ]  && PPO_CMD+=(--ent_coef_high "$ENT_COEF_HIGH")
@@ -418,6 +538,9 @@ PPO_CMD=(
 [ -n "$HEUR_DEVIATION_COEF" ] && PPO_CMD+=(--heur_deviation_coef "$HEUR_DEVIATION_COEF")
 [ -n "$IDLE_QUEUE_PENALTY" ] && PPO_CMD+=(--idle_queue_penalty "$IDLE_QUEUE_PENALTY")
 [ -n "$SAVE_EVERY" ]     && PPO_CMD+=(--save_every     "$SAVE_EVERY")
+[ -n "$TARGET_UPDATES" ] && PPO_CMD+=(--target_updates "$TARGET_UPDATES")
+[ -n "$TARGET_FRAMES" ]  && PPO_CMD+=(--target_frames  "$TARGET_FRAMES")
+[ -n "$RECEIVER_BUFFER_SIZE" ] && PPO_CMD+=(--receiver_buffer_size "$RECEIVER_BUFFER_SIZE")
 [ -n "$SEED" ]          && PPO_CMD+=(--seed           "$SEED")
 [ -n "$SAVE_DIR" ]      && PPO_CMD+=(--save_dir       "$SAVE_DIR")
 PPO_CMD+=(--pipe_path "$STATE_PIPE" --action_pipe_path "$ACTION_PIPE")
@@ -429,6 +552,7 @@ if [ "$DRY_RUN" = false ]; then
     "${PPO_CMD[@]}" > "$LOG_DIR/python.log" 2>&1 &
     PYTHON_PID=$!
     info "Python 训练器已启动 (PID $PYTHON_PID)"
+    write_status "starting" "" "python started"
 fi
 
 # --------------------------------------------------------------------------
@@ -443,6 +567,7 @@ if [ "$DRY_RUN" = false ]; then
         # 检查 Python 进程是否崩溃
         if ! kill -0 "$PYTHON_PID" 2>/dev/null; then
             error "Python 训练器意外退出！"
+            write_status "failed" "1" "python exited before fifo ready"
             echo ""
             error "── Python 日志 ──"
             cat "$LOG_DIR/python.log" 2>/dev/null
@@ -488,6 +613,7 @@ if [ "$DRY_RUN" = false ]; then
     "${SIM_CMD[@]}" 2>&1 | tee "$LOG_DIR/sim.log" &
     SIM_PID=$!
     info "OMNeT++ 仿真已启动 (PID $SIM_PID)"
+    write_status "running" "" "joint simulation running"
 
     # --------------------------------------------------------------------------
     # 监控双端进程：任意一端退出则停止另一端
@@ -499,7 +625,22 @@ if [ "$DRY_RUN" = false ]; then
     echo ""
 
     # 持续检查，直到任意一端退出
+    LOOP_COUNT=0
     while true; do
+        LOOP_COUNT=$((LOOP_COUNT + 1))
+        if [ $((LOOP_COUNT % 10)) -eq 0 ]; then
+            write_status "running" "" "joint simulation running"
+        fi
+
+        AGE_PY=$(file_age_sec "$LOG_DIR/python.log")
+        AGE_SIM=$(file_age_sec "$LOG_DIR/sim.log")
+        if [ "$AGE_PY" -ge "$STALE_TIMEOUT" ] && [ "$AGE_SIM" -ge "$STALE_TIMEOUT" ]; then
+            error "Python 与仿真日志超过 ${STALE_TIMEOUT}s 无更新，判定卡死"
+            write_status "stale" "124" "logs stale for ${STALE_TIMEOUT}s"
+            RUN_EXIT_CODE=124
+            break
+        fi
+
         # 检查仿真是否结束
         if ! kill -0 "$SIM_PID" 2>/dev/null; then
             wait "$SIM_PID" 2>/dev/null
@@ -507,16 +648,29 @@ if [ "$DRY_RUN" = false ]; then
             info "OMNeT++ 仿真已正常结束 (exit code: $SIM_EXIT)"
             # 给 Python 2 秒时间完成最后的保存
             sleep 2
+            if [ "$SIM_EXIT" -eq 0 ] && { [ -z "$TARGET_UPDATES$TARGET_FRAMES" ] || target_reached; }; then
+                write_status "sim_completed" "0" "simulation completed"
+            else
+                local_exit="$SIM_EXIT"
+                [ "$local_exit" -eq 0 ] && local_exit=2
+                write_status "failed" "$local_exit" "simulation ended before target"
+                RUN_EXIT_CODE="$local_exit"
+            fi
             break
         fi
 
         # 检查 Python 是否崩溃
         if ! kill -0 "$PYTHON_PID" 2>/dev/null; then
-            warn "Python 训练器意外退出！仿真将在异步模式下继续..."
-            PYTHON_PID=""
-            # Python 崩溃时不强制停止仿真，仿真会回退到启发式策略
-            # 如需强制停止仿真，取消下一行注释：
-            # break
+            if target_reached; then
+                info "Python 达到目标后正常退出，停止 OMNeT++ 仿真..."
+                write_status "target_reached" "0" "python reached target"
+                RUN_EXIT_CODE=0
+            else
+                warn "Python 训练器异常退出，停止 OMNeT++ 仿真，避免回退启发式污染结果"
+                write_status "failed" "1" "python exited before target"
+                RUN_EXIT_CODE=1
+            fi
+            break
         fi
 
         sleep 1

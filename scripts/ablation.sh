@@ -14,6 +14,8 @@
 #                        [--idle_queue_penalty 0.05]
 #                        [--topology_mode ring] [--grid_cols 3]
 #                        [--metrics_mode full|summary|off] [--save_every 5000]
+#                        [--target_updates 400] [--target_frames 50000]
+#                        [--stale_timeout 300]
 #                        [--jobs 2] [--root_log logs/custom]
 #                        [--dry_run]
 # =============================================================================
@@ -33,6 +35,9 @@ HEUR_COEF="0.01"
 IDLE_QUEUE_PENALTY=""
 METRICS_MODE="full"
 SAVE_EVERY=""
+TARGET_UPDATES=""
+TARGET_FRAMES=""
+STALE_TIMEOUT="300"
 JOBS=1
 TOPOLOGY_MODE=""
 GRID_COLS=""
@@ -52,6 +57,9 @@ while [[ $# -gt 0 ]]; do
         --grid_cols) GRID_COLS="$2"; shift 2 ;;
         --metrics_mode) METRICS_MODE="$2"; shift 2 ;;
         --save_every) SAVE_EVERY="$2"; shift 2 ;;
+        --target_updates) TARGET_UPDATES="$2"; shift 2 ;;
+        --target_frames) TARGET_FRAMES="$2"; shift 2 ;;
+        --stale_timeout) STALE_TIMEOUT="$2"; shift 2 ;;
         --jobs) JOBS="$2"; shift 2 ;;
         --root_log) ROOT_LOG="$2"; shift 2 ;;
         --dry_run)    DRY_RUN=true;    shift ;;
@@ -118,7 +126,13 @@ info "启用 B 时的 heur_deviation_coef = ${HEUR_COEF}"
 [ -n "$IDLE_QUEUE_PENALTY" ] && info "idle_queue_penalty = ${IDLE_QUEUE_PENALTY}"
 info "metrics_mode = ${METRICS_MODE}"
 [ -n "$SAVE_EVERY" ] && info "save_every = ${SAVE_EVERY}"
+[ -n "$TARGET_UPDATES" ] && info "target_updates = ${TARGET_UPDATES}"
+[ -n "$TARGET_FRAMES" ] && info "target_frames = ${TARGET_FRAMES}"
+info "stale_timeout = ${STALE_TIMEOUT}s"
 info "jobs = ${JOBS}"
+
+MANIFEST="$ROOT_LOG/manifest.tsv"
+printf 'scenario\tgroup\tseed\tlog_dir\ttarget_updates\ttarget_frames\tsim_time\n' > "$MANIFEST"
 
 # ---- 组 → 参数映射 ----
 group_params() {
@@ -138,6 +152,9 @@ run_one() {
 
     local LOG_DIR="$ROOT_LOG/${group}/seed${seed}"
     mkdir -p "$LOG_DIR"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${SCENARIO_NAME:-}" "$group" "$seed" "$LOG_DIR" \
+        "$TARGET_UPDATES" "$TARGET_FRAMES" "$SIM_TIME" >> "$MANIFEST"
 
     section "[${group} / seed=${seed}] adaptive=${ADAPTIVE}, heur_coef=${HDEV}"
 
@@ -166,6 +183,9 @@ run_one() {
     [ -n "$IDLE_QUEUE_PENALTY" ] && IDLE_ARGS=(--idle_queue_penalty "$IDLE_QUEUE_PENALTY")
     local SAVE_ARGS=()
     [ -n "$SAVE_EVERY" ] && SAVE_ARGS=(--save_every "$SAVE_EVERY")
+    local TARGET_ARGS=()
+    [ -n "$TARGET_UPDATES" ] && TARGET_ARGS+=(--target_updates "$TARGET_UPDATES")
+    [ -n "$TARGET_FRAMES" ] && TARGET_ARGS+=(--target_frames "$TARGET_FRAMES")
     local TOPOLOGY_ARGS=()
     [ -n "$TOPOLOGY_MODE" ] && TOPOLOGY_ARGS+=(--topology_mode "$TOPOLOGY_MODE")
     [ -n "$GRID_COLS" ] && TOPOLOGY_ARGS+=(--grid_cols "$GRID_COLS")
@@ -176,26 +196,28 @@ run_one() {
 
     # 调用 run_joint.sh（含环境激活/编译检查/管道清理/进程守护/日志收集）
     # --save_dir 让 ppo_trainer 把 ckpt 写到本次隔离目录（不污染项目 checkpoints/）
+    local RUN_RC=0
     bash "$SCRIPT_DIR/run_joint.sh" \
         --num_slots "$NUM_SLOTS" \
         --num_nodes "$NUM_NODES" \
         --sim_time "$SIM_TIME" \
         --seed "$seed" \
+        --group "$group" \
         --adaptive_multiplier "$ADAPTIVE" \
         --record_eventlog false \
         "${TOPOLOGY_ARGS[@]}" \
         --heur_deviation_coef "$HDEV" \
         "${IDLE_ARGS[@]}" \
         "${SAVE_ARGS[@]}" \
+        "${TARGET_ARGS[@]}" \
+        --stale_timeout "$STALE_TIMEOUT" \
         --metrics_mode "$METRICS_MODE" \
         --state_pipe "$STATE_PIPE" \
         --action_pipe "$ACTION_PIPE" \
         --log_dir "$LOG_DIR" \
         --save_dir "$CKPT_DIR" \
         --metrics_dir "$METRICS_DIR" \
-        2>&1 | tee "$LOG_DIR/ablation.log" || {
-            warn "run_joint.sh 返回非零，继续后续实验"
-        }
+        2>&1 | tee "$LOG_DIR/ablation.log" || RUN_RC=$?
 
     local T1=$(date +%s)
     local DT=$((T1 - T0))
@@ -206,15 +228,23 @@ run_one() {
         echo "wall_seconds=$DT"
         echo "num_nodes=$NUM_NODES"
         echo "num_slots=$NUM_SLOTS"
+        [ -n "$TARGET_UPDATES" ] && echo "target_updates=$TARGET_UPDATES"
+        [ -n "$TARGET_FRAMES" ] && echo "target_frames=$TARGET_FRAMES"
+        echo "stale_timeout=$STALE_TIMEOUT"
         [ -n "$TOPOLOGY_MODE" ] && echo "topology_mode=$TOPOLOGY_MODE"
         [ -n "$GRID_COLS" ] && echo "grid_cols=$GRID_COLS"
         echo "state_pipe=$STATE_PIPE"
         echo "action_pipe=$ACTION_PIPE"
         [ -f "$LOG_DIR/python.log" ] && grep -E '^\[PPO\]' "$LOG_DIR/python.log" | tail -1 | sed 's/^/last_ppo=/'
         [ -f "$LOG_DIR/sim.log" ] && grep -E 'Speed:' "$LOG_DIR/sim.log" | tail -1 | sed 's/^ *//;s/^/last_sim_speed=/'
+        [ -f "$LOG_DIR/run_status.tsv" ] && awk -F '\t' '$1=="status"{print "run_status="$2} $1=="message"{print "run_message="$2}' "$LOG_DIR/run_status.tsv"
         [ -d "$METRICS_DIR" ] && du -sh "$METRICS_DIR" | awk '{print "metrics_size="$1}'
         [ -d "$CKPT_DIR" ] && du -sh "$CKPT_DIR" | awk '{print "checkpoint_size="$1}'
     } > "$LOG_DIR/run_perf.txt" 2>/dev/null || true
+    if [ "$RUN_RC" -ne 0 ]; then
+        warn "run_joint.sh 返回非零: ${RUN_RC}"
+        return "$RUN_RC"
+    fi
 }
 
 # ---- 主循环 ----
@@ -252,5 +282,8 @@ done
 
 section "全部消融完成"
 info "结果根目录: $ROOT_LOG"
+if [ "$DRY_RUN" = false ] && [ -f "$SCRIPT_DIR/monitor_runs.py" ]; then
+    python "$SCRIPT_DIR/monitor_runs.py" "$ROOT_LOG" --once || true
+fi
 info "下一步：用 rl 日志解析脚本汇总各组 avg_r / entropy / heur_dev 平均值"
 [ "$FAILED" -eq 0 ] || exit 1

@@ -178,6 +178,13 @@ def sim_completed(path: Path) -> bool:
     return "Simulation time limit reached" in text and "End." in text
 
 
+def target_completed(path: Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    return "[PPO] target_updates reached:" in text or "[PPO] target_frames reached:" in text
+
+
 def summarize_slot_stats(path: Path, num_slots: float = math.nan, total_arrivals: float = math.nan) -> dict[str, float]:
     if not path.exists():
         return {}
@@ -414,14 +421,20 @@ def summarize_run(scenario: str, group: str, seed: int, run_dir: Path) -> dict[s
         )
 
     final_frame = row.get("final_frame")
-    complete = (
-        sim_completed(run_dir / "sim.log")
-        and float(row.get("ppo_frame", 0.0)) > 0.0
+    has_core_outputs = (
+        float(row.get("ppo_frame", 0.0)) > 0.0
         and float(row.get("ppo_update", 0.0)) > 0.0
         and float(row.get("slot_final_nodes", 0.0)) > 0.0
+    )
+    full_sim_complete = (
+        sim_completed(run_dir / "sim.log")
         and final_frame == row.get("fairness_final_frame")
         and final_frame == row.get("frame_metrics_final_frame")
     )
+    # Target-limited runs intentionally stop OMNeT++ once PPO reaches the requested
+    # update/frame budget, so the CSV writers may flush at slightly different final frames.
+    target_complete = target_completed(run_dir / "python.log")
+    complete = has_core_outputs and (full_sim_complete or target_complete)
     row["complete"] = complete
     return row
 

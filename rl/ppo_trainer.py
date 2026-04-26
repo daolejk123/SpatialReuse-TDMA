@@ -71,6 +71,9 @@ class PPOConfig:
     update_every: int   = 128      # 每 K 帧执行一次 PPO 更新
     ppo_epochs:   int   = 4        # 每次更新的梯度步数
     save_every:   int   = 500      # 每 N 帧保存一次权重
+    target_updates: int = 0        # 达到 N 次 PPO 更新后正常退出（0=禁用）
+    target_frames: int  = 0        # 达到 N 帧后正常退出（0=禁用）
+    receiver_buffer_size: int = 32768  # 状态接收缓冲；小值可对 C++ 形成背压
     lr_decay_gamma: float = 0.9995 # 指数衰减：每次 PPO 更新后 lr *= lr_decay_gamma
 
     # 奖励函数权重
@@ -341,7 +344,7 @@ def bc_pretrain(cfg: PPOConfig):
         with connect(
             num_nodes   = cfg.num_nodes,
             pipe_path   = cfg.pipe_path,
-            buffer_size = 32768,
+            buffer_size = cfg.receiver_buffer_size,
         ) as frames:
             for frame_obs in frames:
                 frame_count += 1
@@ -478,6 +481,7 @@ def train(cfg: PPOConfig):
     # 运行统计
     frame_count   = 0
     update_count  = 0
+    stop_requested = False
     episode_rewards: Dict[int, float] = collections.defaultdict(float)
     # 奖励重塑：逐时隙 EWMA 基线，差分奖励减小方差
     reward_baselines: Dict[int, torch.Tensor] = {}  # nid → (M,)
@@ -504,7 +508,7 @@ def train(cfg: PPOConfig):
         with connect(
             num_nodes   = cfg.num_nodes,
             pipe_path   = cfg.pipe_path,
-            buffer_size = 32768,
+            buffer_size = cfg.receiver_buffer_size,
         ) as frames:
             for frame_obs in frames:
                 frame_count += 1
@@ -671,11 +675,21 @@ def train(cfg: PPOConfig):
                         f"lr={cur_lr:.2e}  "
                         f"({elapsed*1000:.1f}ms)"
                     )
+                    if cfg.target_updates > 0 and update_count >= cfg.target_updates:
+                        print(f"[PPO] target_updates reached: {cfg.target_updates}")
+                        stop_requested = True
 
                 # ── 6. 定期保存权重 ─────────────────────────────────
                 if frame_count % cfg.save_every == 0:
                     _save_agents(agents, str(save_dir / f"tdma_ppo_frame{frame_count}.pt"))
                     _save_agents(agents, str(save_dir / "tdma_ppo_latest.pt"))
+
+                if cfg.target_frames > 0 and frame_count >= cfg.target_frames:
+                    print(f"[PPO] target_frames reached: {cfg.target_frames}")
+                    stop_requested = True
+
+                if stop_requested:
+                    break
 
     except KeyboardInterrupt:
         print(f"\n[PPO] 收到中断，共训练 {frame_count} 帧，{update_count} 次更新。")
@@ -716,6 +730,12 @@ def _parse_args() -> PPOConfig:
     p.add_argument("--lr_decay_gamma",   type=float, default=0.9995,
                    help="指数 LR 衰减：每次 PPO 更新后 lr *= lr_decay_gamma（1.0=不衰减）")
     p.add_argument("--save_every",    type=int,   default=500)
+    p.add_argument("--target_updates", type=int,  default=0,
+                   help="达到指定 PPO update 次数后正常退出（0=禁用）")
+    p.add_argument("--target_frames",  type=int,  default=0,
+                   help="达到指定 frame 次数后正常退出（0=禁用）")
+    p.add_argument("--receiver_buffer_size", type=int, default=32768,
+                   help="状态接收缓冲帧数；target 对齐实验建议使用小值形成背压")
     p.add_argument("--device",        type=str,   default="cpu")
     p.add_argument("--save_dir",     type=str,   default="checkpoints")
     p.add_argument("--pipe_path",    type=str,   default="/tmp/tdma_rl_state")

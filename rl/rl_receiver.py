@@ -280,6 +280,14 @@ class RLReceiver:
         if self.on_frame:
             self.on_frame(frame_obs)
         with self._cond:
+            while (
+                self._buf.maxlen is not None
+                and len(self._buf) >= self._buf.maxlen
+                and not self._stop.is_set()
+            ):
+                self._cond.wait(timeout=1.0)
+            if self._stop.is_set():
+                return
             self._buf.append(frame_obs)
             self._cond.notify_all()
 
