@@ -42,6 +42,12 @@ simple DynamicTDMA
 
         // 指标输出目录；为空时沿用 results/ 下按时间戳命名的默认输出。
         string metricsOutputDir = default("");
+        // full=完整 CSV+node_features，summary=仅 CSV，off=关闭磁盘指标输出。
+        string metricsMode = default("full");
+
+        // RL 管道路径；批量并行实验时由脚本写入独立 FIFO，避免 run 间冲突。
+        string rlStatePipePath = default("/tmp/tdma_rl_state");
+        string rlActionPipePath = default("/tmp/tdma_rl_action");
 
         // 仿真显示相关
         @display("i=block/mac");

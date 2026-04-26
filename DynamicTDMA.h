@@ -172,6 +172,8 @@ protected:
   std::string frameMetricsCsvPath;
   std::string fairnessCsvPath;
   std::string featureJsonlPath;
+  bool metricsEnabled = true;
+  bool featureTraceEnabled = true;
 
   // RL 同步参数（从 omnetpp.ini 读取）
   // rlSyncInterval = 0：异步（不等待，原有行为）
@@ -187,12 +189,12 @@ protected:
   // RL 命名管道：C++ → Python 实时特征推送
   // 所有节点共享同一个 fd（OMNeT++ 单线程，无竞争）
   static int sRlPipeFd;
-  static const char *kRlPipePath;        // "/tmp/tdma_rl_state"
+  static std::string sRlPipePath;        // 默认 "/tmp/tdma_rl_state"
   static long long sRlReconnectCounter;  // 限速重连：每 N 帧重试一次
 
   // RL 动作管道：Python → C++ 动作回传（闭环训练）
   static int sRlActionPipeFd;
-  static const char *kRlActionPipePath;  // "/tmp/tdma_rl_action"
+  static std::string sRlActionPipePath;  // 默认 "/tmp/tdma_rl_action"
   static long long sRlActionReconnectCounter;
   // 缓存最新一帧的 RL 动作：sRlActionMap[nodeId][slot] = 申请概率
   static std::map<int, std::vector<double>> sRlActionMap;

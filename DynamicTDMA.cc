@@ -7,17 +7,18 @@
 #include <algorithm>
 #include <filesystem>
 #include <system_error>
+#include <cctype>
 
 Define_Module(DynamicTDMA);
 
 // RL 管道静态成员定义
 int DynamicTDMA::sRlPipeFd = -1;
-const char *DynamicTDMA::kRlPipePath = "/tmp/tdma_rl_state";
+std::string DynamicTDMA::sRlPipePath = "/tmp/tdma_rl_state";
 long long DynamicTDMA::sRlReconnectCounter = 0;
 
 // RL 动作管道静态成员定义（Python → C++）
 int DynamicTDMA::sRlActionPipeFd = -1;
-const char *DynamicTDMA::kRlActionPipePath = "/tmp/tdma_rl_action";
+std::string DynamicTDMA::sRlActionPipePath = "/tmp/tdma_rl_action";
 long long DynamicTDMA::sRlActionReconnectCounter = 0;
 std::map<int, std::vector<double>> DynamicTDMA::sRlActionMap;
 long long DynamicTDMA::sRlActionFrame = -1;
@@ -48,6 +49,12 @@ static std::string buildTimestampedDir(const std::string &prefix,
   std::ostringstream oss;
   oss << prefix << std::put_time(&tm, "%Y%m%d_%H%M%S");
   return useResultsDir ? ("results/" + oss.str()) : oss.str();
+}
+
+static std::string lowerAscii(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) { return (char)std::tolower(c); });
+  return value;
 }
 
 static std::string joinPath(const std::string &dir, const std::string &name) {
@@ -167,16 +174,29 @@ void DynamicTDMA::initialize() {
     rampFramesLeft = std::max(1, rampHoldFrames);
     rampWaitingEmpty = false;
   }
+  if (hasPar("rlStatePipePath")) {
+    sRlPipePath = par("rlStatePipePath").stdstringValue();
+  }
+  if (hasPar("rlActionPipePath")) {
+    sRlActionPipePath = par("rlActionPipePath").stdstringValue();
+  }
   lastGeneratedThisFrame = 0;
   prevQueueSize = 0;
 
   // 统计输出文件：每次仿真所有节点共用同一路径。
+  std::string metricsMode =
+      hasPar("metricsMode") ? lowerAscii(par("metricsMode").stdstringValue())
+                            : "full";
+  metricsEnabled = (metricsMode != "off");
+  featureTraceEnabled = (metricsMode == "full");
   static std::string gStatsCsvPath;
   static std::string gFrameMetricsPath;
   static std::string gFairnessPath;
   static std::string gFeatureBaseDir;
-  if (gStatsCsvPath.empty() || gFrameMetricsPath.empty() ||
-      gFairnessPath.empty() || gFeatureBaseDir.empty()) {
+  if (metricsEnabled &&
+      (gStatsCsvPath.empty() || gFrameMetricsPath.empty() ||
+       gFairnessPath.empty() ||
+       (featureTraceEnabled && gFeatureBaseDir.empty()))) {
     std::string metricsDir =
         hasPar("metricsOutputDir") ? par("metricsOutputDir").stdstringValue()
                                    : "";
@@ -187,8 +207,12 @@ void DynamicTDMA::initialize() {
         gStatsCsvPath = joinPath(metricsDir, "slot_stats.csv");
         gFrameMetricsPath = joinPath(metricsDir, "frame_metrics.csv");
         gFairnessPath = joinPath(metricsDir, "fairness.csv");
-        gFeatureBaseDir = joinPath(metricsDir, "node_features");
-        std::filesystem::create_directories(gFeatureBaseDir, ec);
+        if (featureTraceEnabled) {
+          gFeatureBaseDir = joinPath(metricsDir, "node_features");
+          std::filesystem::create_directories(gFeatureBaseDir, ec);
+        } else {
+          gFeatureBaseDir.clear();
+        }
       }
       if (ec) {
         EV << "WARNING: Cannot create metricsOutputDir (" << metricsDir
@@ -201,7 +225,8 @@ void DynamicTDMA::initialize() {
     }
 
     if (gStatsCsvPath.empty() || gFrameMetricsPath.empty() ||
-        gFairnessPath.empty() || gFeatureBaseDir.empty()) {
+        gFairnessPath.empty() ||
+        (featureTraceEnabled && gFeatureBaseDir.empty())) {
       // 优先写到 results/ 目录；失败时回退到当前目录
       std::string primary = buildTimestampedStatsPath("slot_stats_", true);
       std::ofstream test(primary, std::ios::app);
@@ -228,20 +253,26 @@ void DynamicTDMA::initialize() {
       } else {
         gFairnessPath = buildTimestampedStatsPath("fairness_", false);
       }
-      std::string featurePrimary = buildTimestampedDir("node_features_", true);
-      gFeatureBaseDir = featurePrimary;
-      std::error_code ec;
-      std::filesystem::create_directories(gFeatureBaseDir, ec);
-      if (ec) {
-        gFeatureBaseDir = buildTimestampedDir("node_features_", false);
+      if (featureTraceEnabled) {
+        std::string featurePrimary = buildTimestampedDir("node_features_", true);
+        gFeatureBaseDir = featurePrimary;
+        std::error_code ec;
         std::filesystem::create_directories(gFeatureBaseDir, ec);
+        if (ec) {
+          gFeatureBaseDir = buildTimestampedDir("node_features_", false);
+          std::filesystem::create_directories(gFeatureBaseDir, ec);
+        }
+      } else {
+        gFeatureBaseDir.clear();
       }
     }
   }
-  statsCsvPath = gStatsCsvPath;
-  frameMetricsCsvPath = gFrameMetricsPath;
-  fairnessCsvPath = gFairnessPath;
-  if (!gFeatureBaseDir.empty()) {
+  if (metricsEnabled) {
+    statsCsvPath = gStatsCsvPath;
+    frameMetricsCsvPath = gFrameMetricsPath;
+    fairnessCsvPath = gFairnessPath;
+  }
+  if (metricsEnabled && featureTraceEnabled && !gFeatureBaseDir.empty()) {
     std::string nodeDir =
         gFeatureBaseDir + "/node_" + std::to_string(myId);
     std::error_code ec;
@@ -775,28 +806,30 @@ void DynamicTDMA::processSlotTimer() {
               return 1.0; // 全 0 吞吐：定义为完全公平
             return (sum * sum) / ((double)numNodes * sumSq);
           };
-          double jainTx = jain(agg.sumTx, agg.sumTxSq);
-          const std::string &fairPath = fairnessCsvPath;
-          std::ofstream fofs(fairPath, std::ios::app);
-          if (fofs.is_open()) {
-            bool needHeader = false;
-            {
-              std::ifstream ifs(fairPath.c_str());
-              needHeader = (!ifs.is_open()) ||
-                           (ifs.peek() == std::ifstream::traits_type::eof());
+          if (metricsEnabled) {
+            double jainTx = jain(agg.sumTx, agg.sumTxSq);
+            const std::string &fairPath = fairnessCsvPath;
+            std::ofstream fofs(fairPath, std::ios::app);
+            if (fofs.is_open()) {
+              bool needHeader = false;
+              {
+                std::ifstream ifs(fairPath.c_str());
+                needHeader = (!ifs.is_open()) ||
+                             (ifs.peek() == std::ifstream::traits_type::eof());
+              }
+              if (needHeader) {
+                fofs << "frame,jain_tx,sum_delta_packets,sum_queue,sum_arrivals,"
+                        "sum_queue_delta,traffic_rate\n";
+              }
+              fofs << frameCounter << "," << jainTx << "," << agg.sumPkt << ","
+                   << agg.sumQueue << "," << agg.sumArrivals << ","
+                   << agg.sumQueueDelta << "," << trafficArrivalRate << "\n";
+              fofs.close();
+            } else {
+              EV << "WARNING: Cannot open fairness output file (" << fairPath
+                 << ")."
+                 << endl;
             }
-            if (needHeader) {
-              fofs << "frame,jain_tx,sum_delta_packets,sum_queue,sum_arrivals,"
-                      "sum_queue_delta,traffic_rate\n";
-            }
-            fofs << frameCounter << "," << jainTx << "," << agg.sumPkt << ","
-                 << agg.sumQueue << "," << agg.sumArrivals << ","
-                 << agg.sumQueueDelta << "," << trafficArrivalRate << "\n";
-            fofs.close();
-          } else {
-            EV << "WARNING: Cannot open fairness output file (" << fairPath
-               << ")."
-               << endl;
           }
 
           gAggByFrame.erase(frameCounter);
@@ -805,29 +838,31 @@ void DynamicTDMA::processSlotTimer() {
 
       prevQueueSize = (int)packetQueue.size();
 
-      const std::string &path = statsCsvPath;
-      std::ofstream ofs(path, std::ios::app);
+      if (metricsEnabled) {
+        const std::string &path = statsCsvPath;
+        std::ofstream ofs(path, std::ios::app);
 
-      if (ofs.is_open()) {
-        // 写表头（若文件为空或刚创建）
-        bool needHeader = false;
-        {
-          std::ifstream ifs(path.c_str());
-          needHeader =
-              (!ifs.is_open()) || (ifs.peek() == std::ifstream::traits_type::eof());
+        if (ofs.is_open()) {
+          // 写表头（若文件为空或刚创建）
+          bool needHeader = false;
+          {
+            std::ifstream ifs(path.c_str());
+            needHeader =
+                (!ifs.is_open()) || (ifs.peek() == std::ifstream::traits_type::eof());
+          }
+          if (needHeader) {
+            ofs << "simTime,frame,nodeId,totalSlotRequests,totalSuccessfulTx,totalSuccessfulPackets,"
+                   "totalGeneratedPrio0,totalGeneratedPrio1,totalGeneratedPrio2\n";
+          }
+          ofs << simTime() << "," << frameCounter << "," << myId << ","
+              << totalSlotRequestCount << "," << totalSuccessfulTxCount << ","
+              << totalSuccessfulPacketCount << "," << totalGeneratedByPriority[0] << ","
+              << totalGeneratedByPriority[1] << "," << totalGeneratedByPriority[2]
+              << "\n";
+          ofs.close();
+        } else {
+          EV << "WARNING: Cannot open stats output file (" << path << ")." << endl;
         }
-        if (needHeader) {
-          ofs << "simTime,frame,nodeId,totalSlotRequests,totalSuccessfulTx,totalSuccessfulPackets,"
-                 "totalGeneratedPrio0,totalGeneratedPrio1,totalGeneratedPrio2\n";
-        }
-        ofs << simTime() << "," << frameCounter << "," << myId << ","
-            << totalSlotRequestCount << "," << totalSuccessfulTxCount << ","
-            << totalSuccessfulPacketCount << "," << totalGeneratedByPriority[0] << ","
-            << totalGeneratedByPriority[1] << "," << totalGeneratedByPriority[2]
-            << "\n";
-        ofs.close();
-      } else {
-        EV << "WARNING: Cannot open stats output file (" << path << ")." << endl;
       }
 
       // --- 每帧详细指标输出 ---
@@ -1070,35 +1105,38 @@ void DynamicTDMA::processSlotTimer() {
               : 0.0;
 
       // 8) 输出 CSV
-      const std::string &framePath = frameMetricsCsvPath;
-      std::ofstream fofs(framePath, std::ios::app);
-      if (fofs.is_open()) {
-        bool needHeader = false;
-        {
-          std::ifstream ifs(framePath.c_str());
-          needHeader =
-              (!ifs.is_open()) || (ifs.peek() == std::ifstream::traits_type::eof());
+      if (metricsEnabled) {
+        const std::string &framePath = frameMetricsCsvPath;
+        std::ofstream fofs(framePath, std::ios::app);
+        if (fofs.is_open()) {
+          bool needHeader = false;
+          {
+            std::ifstream ifs(framePath.c_str());
+            needHeader =
+                (!ifs.is_open()) || (ifs.peek() == std::ifstream::traits_type::eof());
+          }
+          if (needHeader) {
+            fofs << "simTime,frame,nodeId,Bown,T2hop,Cctrl,mu_nbr,Qt,lambda_ewma,"
+                  "Wt,Sharet,Share_avgnbr,Jlocal,Envy,req_candidates,req_sent,"
+                  "req_rate_observed,req_prob_avg\n";
+          }
+          fofs << simTime() << "," << frameCounter << "," << myId << ","
+               << "\"" << bownBitmap << "\","
+               << "\"" << t2hop.str() << "\","
+               << ctrlCollisionCount << "," << muNbr << "," << Qt << ","
+               << lambdaEwma << "," << Wt << "," << Sharet << "," << ShareAvgNbr
+               << "," << Jlocal << "," << Envy << "," << reqCandidateCount << ","
+               << reqSentCount << "," << reqRateObserved << "," << reqProbAvg
+               << "\n";
+          fofs.close();
+        } else {
+          EV << "WARNING: Cannot open frame metrics output file (" << framePath
+             << ")." << endl;
         }
-      if (needHeader) {
-          fofs << "simTime,frame,nodeId,Bown,T2hop,Cctrl,mu_nbr,Qt,lambda_ewma,"
-                "Wt,Sharet,Share_avgnbr,Jlocal,Envy,req_candidates,req_sent,"
-                "req_rate_observed,req_prob_avg\n";
-        }
-        fofs << simTime() << "," << frameCounter << "," << myId << ","
-             << "\"" << bownBitmap << "\","
-             << "\"" << t2hop.str() << "\","
-             << ctrlCollisionCount << "," << muNbr << "," << Qt << ","
-             << lambdaEwma << "," << Wt << "," << Sharet << "," << ShareAvgNbr
-             << "," << Jlocal << "," << Envy << "," << reqCandidateCount << ","
-             << reqSentCount << "," << reqRateObserved << "," << reqProbAvg
-             << "\n";
-        fofs.close();
-      } else {
-        EV << "WARNING: Cannot open frame metrics output file (" << framePath
-           << ")." << endl;
       }
 
     // 9) 分装每个节点的特征输出（JSONL，按帧一行）
+    if (featureTraceEnabled && !featureJsonlPath.empty()) {
     const std::string &featPath = featureJsonlPath;
     std::ofstream jf(featPath, std::ios::app);
     if (jf.is_open()) {
@@ -1124,6 +1162,7 @@ void DynamicTDMA::processSlotTimer() {
     } else {
       EV << "WARNING: Cannot open feature output file (" << featPath << ")."
          << endl;
+    }
     }
 
     lastReqProbAvg = reqProbAvg;
@@ -1820,22 +1859,22 @@ void DynamicTDMA::initRlPipe() {
     return; // 已经由其他节点初始化过
 
   // 创建 FIFO（若已存在则忽略 EEXIST）
-  int ret = mkfifo(kRlPipePath, 0666);
+  int ret = mkfifo(sRlPipePath.c_str(), 0666);
   if (ret < 0 && errno != EEXIST) {
-    EV << "WARNING: mkfifo(" << kRlPipePath << ") failed: " << strerror(errno)
+    EV << "WARNING: mkfifo(" << sRlPipePath << ") failed: " << strerror(errno)
        << endl;
     return;
   }
 
   // 阻塞等待 Python RL 训练器打开读端（作为启动同步点）
   // 仿真在 Python 就绪前不会开始运行，确保 RL 闭环从第 1 帧生效
-  EV << "INFO: Waiting for Python RL trainer to connect " << kRlPipePath
+  EV << "INFO: Waiting for Python RL trainer to connect " << sRlPipePath
      << " ..." << endl;
-  sRlPipeFd = open(kRlPipePath, O_WRONLY);
+  sRlPipeFd = open(sRlPipePath.c_str(), O_WRONLY);
   if (sRlPipeFd < 0) {
     EV << "WARNING: RL pipe open failed: " << strerror(errno) << endl;
   } else {
-    EV << "INFO: Python RL trainer connected -> " << kRlPipePath << endl;
+    EV << "INFO: Python RL trainer connected -> " << sRlPipePath << endl;
   }
 }
 
@@ -1844,7 +1883,7 @@ void DynamicTDMA::writeRlFeatures(const RlFrameFeatures &f) {
   if (sRlPipeFd < 0) {
     if ((sRlReconnectCounter++ % 10) != 0)
       return;
-    sRlPipeFd = open(kRlPipePath, O_WRONLY | O_NONBLOCK);
+    sRlPipeFd = open(sRlPipePath.c_str(), O_WRONLY | O_NONBLOCK);
     if (sRlPipeFd < 0)
       return; // Python 仍未就绪，本帧跳过
     EV << "INFO: RL pipe reconnected." << endl;
@@ -1933,20 +1972,20 @@ void DynamicTDMA::initRlActionPipe() {
   if (sRlActionPipeFd >= 0)
     return;
 
-  int ret = mkfifo(kRlActionPipePath, 0666);
+  int ret = mkfifo(sRlActionPipePath.c_str(), 0666);
   if (ret < 0 && errno != EEXIST) {
-    EV << "WARNING: mkfifo(" << kRlActionPipePath
+    EV << "WARNING: mkfifo(" << sRlActionPipePath
        << ") failed: " << strerror(errno) << endl;
     return;
   }
 
   // O_RDWR|O_NONBLOCK：同时持有读写端，防止无写者时 read() 返回 EOF(0)
   // 若仅持有读端（O_RDONLY）且 Python 尚未写入，read() 会立即返回 0 导致误关闭
-  sRlActionPipeFd = open(kRlActionPipePath, O_RDWR | O_NONBLOCK);
+  sRlActionPipeFd = open(sRlActionPipePath.c_str(), O_RDWR | O_NONBLOCK);
   if (sRlActionPipeFd < 0) {
     EV << "INFO: RL action pipe open failed: " << strerror(errno) << endl;
   } else {
-    EV << "INFO: RL action pipe opened (O_RDWR) -> " << kRlActionPipePath << endl;
+    EV << "INFO: RL action pipe opened (O_RDWR) -> " << sRlActionPipePath << endl;
   }
 }
 
@@ -2039,7 +2078,7 @@ void DynamicTDMA::readRlActions() {
   if (sRlActionPipeFd < 0) {
     if ((sRlActionReconnectCounter++ % 10) != 0)
       return;
-    sRlActionPipeFd = open(kRlActionPipePath, O_RDWR | O_NONBLOCK);
+    sRlActionPipeFd = open(sRlActionPipePath.c_str(), O_RDWR | O_NONBLOCK);
     if (sRlActionPipeFd < 0)
       return;
     EV << "INFO: RL action pipe reconnected (O_RDWR)." << endl;

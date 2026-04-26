@@ -26,8 +26,15 @@
 #   --bc_lr F            BC 预训练学习率（默认 1e-3）
 #   --heur_deviation_coef F  方向B 软正则系数（默认 0=禁用，建议 0.005~0.02）
 #   --idle_queue_penalty F   有队列但未申请时隙的惩罚（默认 0=禁用，建议 0.05）
+#   --save_every N       每 N 帧保存一次 checkpoint（默认使用训练器默认值）
 #   --seed N             随机种子（-1=不设置；>=0 公平比较消融用）
 #   --metrics_dir DIR    网络指标输出目录（默认使用 results/ 下的时间戳文件）
+#   --metrics_mode MODE  full|summary|off（默认 full）
+#   --state_pipe PATH    C++→Python 状态 FIFO 路径（默认 /tmp/tdma_rl_state）
+#   --action_pipe PATH   Python→C++ 动作 FIFO 路径（默认 /tmp/tdma_rl_action）
+#   --sim_time N         写入临时 ini 的 sim-time-limit（秒）
+#   --adaptive_multiplier BOOL 写入临时 ini 的 adaptiveMultiplier
+#   --record_eventlog BOOL 写入临时 ini 的 record-eventlog
 #   --log_dir DIR        日志目录（默认 logs/<timestamp>）
 #   --gui                使用 GUI 模式运行仿真（默认 Cmdenv 命令行模式）
 #   --rebuild            强制重新编译 DynamicTDMA
@@ -79,9 +86,14 @@ BC_FRAMES=""
 BC_LR=""
 HEUR_DEVIATION_COEF=""
 IDLE_QUEUE_PENALTY=""
+SAVE_EVERY=""
 SEED=""
 SAVE_DIR=""
 METRICS_DIR=""
+METRICS_MODE="full"
+SIM_TIME=""
+ADAPTIVE_MULTIPLIER=""
+RECORD_EVENTLOG=""
 
 # --------------------------------------------------------------------------
 # 参数解析
@@ -109,9 +121,16 @@ while [[ $# -gt 0 ]]; do
         --bc_lr)        BC_LR="$2";      shift 2 ;;
         --heur_deviation_coef) HEUR_DEVIATION_COEF="$2"; shift 2 ;;
         --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
+        --save_every)   SAVE_EVERY="$2"; shift 2 ;;
         --seed)         SEED="$2";       shift 2 ;;
         --save_dir)     SAVE_DIR="$2";   shift 2 ;;
         --metrics_dir)  METRICS_DIR="$2"; shift 2 ;;
+        --metrics_mode) METRICS_MODE="$2"; shift 2 ;;
+        --state_pipe)   STATE_PIPE="$2"; shift 2 ;;
+        --action_pipe)  ACTION_PIPE="$2"; shift 2 ;;
+        --sim_time)     SIM_TIME="$2"; shift 2 ;;
+        --adaptive_multiplier) ADAPTIVE_MULTIPLIER="$2"; shift 2 ;;
+        --record_eventlog) RECORD_EVENTLOG="$2"; shift 2 ;;
         --gui)          USE_GUI=true;     shift ;;
         --rebuild)      REBUILD=true;     shift ;;
         --dry_run)      DRY_RUN=true;     shift ;;
@@ -133,6 +152,11 @@ info()    { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 section() { echo -e "\n${CYAN}══ $* ══${NC}"; }
+
+case "$METRICS_MODE" in
+    full|summary|off) ;;
+    *) error "metrics_mode 只能是 full、summary 或 off，当前: $METRICS_MODE"; exit 1 ;;
+esac
 
 # --------------------------------------------------------------------------
 # 环境检查
@@ -200,10 +224,14 @@ info "load_ckpt    = ${LOAD_CKPT:-（新训练，不加载权重）}"
 info "log_dir      = $LOG_DIR"
 info "use_gui      = $USE_GUI"
 [ -n "$METRICS_DIR" ] && info "metrics_dir  = $METRICS_DIR"
+info "metrics_mode = $METRICS_MODE"
+info "state_pipe   = $STATE_PIPE"
+info "action_pipe  = $ACTION_PIPE"
 [ -n "$ENT_COEF" ]    && info "ent_coef     = $ENT_COEF"
 [ -n "$PPO_EPOCHS" ]  && info "ppo_epochs   = $PPO_EPOCHS"
 [ -n "$R_GAMMA" ]     && info "r_gamma      = $R_GAMMA"
 [ -n "$UPDATE_EVERY" ] && info "update_every = $UPDATE_EVERY"
+[ -n "$SAVE_EVERY" ] && info "save_every   = $SAVE_EVERY"
 [ -n "$IDLE_QUEUE_PENALTY" ] && info "idle_queue_penalty = $IDLE_QUEUE_PENALTY"
 
 if [ "$SYNC_INTERVAL" -gt 0 ] 2>/dev/null; then
@@ -217,6 +245,7 @@ fi
 PYTHON_PID=""
 SIM_PID=""
 TEMP_INI=""
+RUN_START_TS=$(date +%s)
 
 # --------------------------------------------------------------------------
 # 退出清理
@@ -242,8 +271,7 @@ cleanup() {
         wait "$SIM_PID" 2>/dev/null || true
         info "仿真已退出"
     fi
-    pkill -f "DynamicTDMA.*Cmdenv" 2>/dev/null || true
-    pkill -f "DynamicTDMA.*Qtenv"  2>/dev/null || true
+    [ -n "$TEMP_INI" ] && pkill -f "DynamicTDMA.*$(basename "$TEMP_INI")" 2>/dev/null || true
 
     # 清理命名管道和临时文件
     rm -f "$STATE_PIPE" "$ACTION_PIPE" 2>/dev/null
@@ -260,6 +288,14 @@ cleanup() {
         echo -e "${CYAN}── OMNeT++ 仿真末尾日志 (最后 10 行) ──${NC}"
         tail -10 "$LOG_DIR/sim.log"
     fi
+    {
+        echo "wall_seconds=$(( $(date +%s) - RUN_START_TS ))"
+        echo "exit_code=$exit_code"
+        [ -f "$LOG_DIR/python.log" ] && grep -E '^\[PPO\]' "$LOG_DIR/python.log" | tail -1 | sed 's/^/last_ppo=/'
+        [ -f "$LOG_DIR/sim.log" ] && grep -E 'Speed:' "$LOG_DIR/sim.log" | tail -1 | sed 's/^ *//;s/^/last_sim_speed=/'
+        [ -n "$METRICS_DIR" ] && [ -d "$METRICS_DIR" ] && du -sh "$METRICS_DIR" | awk '{print "metrics_size="$1}'
+        [ -n "$SAVE_DIR" ] && [ -d "$SAVE_DIR" ] && du -sh "$SAVE_DIR" | awk '{print "checkpoint_size="$1}'
+    } > "$LOG_DIR/run_perf.txt" 2>/dev/null || true
 
     echo ""
     info "所有日志已保存至: $LOG_DIR"
@@ -302,9 +338,36 @@ sed \
     -e "s|^\(\*\*\.nodes\[\*\]\.rlSyncInterval\s*=\s*\).*|\1$SYNC_INTERVAL|" \
     -e "s|^\(\*\*\.nodes\[\*\]\.rlSyncTimeoutSec\s*=\s*\).*|\1$SYNC_TIMEOUT|" \
     omnetpp.ini > "$TEMP_INI"
+
+ensure_trailing_newline() {
+    local last
+    [ -s "$TEMP_INI" ] || return
+    last="$(tail -c 1 "$TEMP_INI" | od -An -t u1 | tr -d '[:space:]')"
+    [ "$last" = "10" ] || printf '\n' >> "$TEMP_INI"
+}
+
+set_or_append_ini() {
+    local pattern="$1"
+    local line="$2"
+    if grep -qE "$pattern" "$TEMP_INI"; then
+        sed -i -E "s|$pattern.*|$line|" "$TEMP_INI"
+    else
+        ensure_trailing_newline
+        printf '%s\n' "$line" >> "$TEMP_INI"
+    fi
+    ensure_trailing_newline
+}
+
+[ -n "$SIM_TIME" ] && set_or_append_ini '^sim-time-limit[[:space:]]*=' "sim-time-limit = ${SIM_TIME}s"
+[ -n "$RECORD_EVENTLOG" ] && set_or_append_ini '^record-eventlog[[:space:]]*=' "record-eventlog = ${RECORD_EVENTLOG}"
+[ -n "$SEED" ] && set_or_append_ini '^seed-set[[:space:]]*=' "seed-set = ${SEED}"
+[ -n "$ADAPTIVE_MULTIPLIER" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.adaptiveMultiplier[[:space:]]*=' "**.nodes[*].adaptiveMultiplier = ${ADAPTIVE_MULTIPLIER}"
+set_or_append_ini '^\*\*\.nodes\[\*\]\.metricsMode[[:space:]]*=' "**.nodes[*].metricsMode = \"${METRICS_MODE}\""
+set_or_append_ini '^\*\*\.nodes\[\*\]\.rlStatePipePath[[:space:]]*=' "**.nodes[*].rlStatePipePath = \"${STATE_PIPE}\""
+set_or_append_ini '^\*\*\.nodes\[\*\]\.rlActionPipePath[[:space:]]*=' "**.nodes[*].rlActionPipePath = \"${ACTION_PIPE}\""
 if [ -n "$METRICS_DIR" ]; then
     mkdir -p "$METRICS_DIR"
-    printf '\n**.nodes[*].metricsOutputDir = "%s"\n' "$METRICS_DIR" >> "$TEMP_INI"
+    set_or_append_ini '^\*\*\.nodes\[\*\]\.metricsOutputDir[[:space:]]*=' "**.nodes[*].metricsOutputDir = \"${METRICS_DIR}\""
 fi
 info "临时 ini: $(basename "$TEMP_INI")  (rlSyncInterval=$SYNC_INTERVAL, rlSyncTimeoutSec=$SYNC_TIMEOUT)"
 
@@ -334,8 +397,10 @@ PPO_CMD=(
 [ -n "$BC_LR" ]         && PPO_CMD+=(--bc_lr          "$BC_LR")
 [ -n "$HEUR_DEVIATION_COEF" ] && PPO_CMD+=(--heur_deviation_coef "$HEUR_DEVIATION_COEF")
 [ -n "$IDLE_QUEUE_PENALTY" ] && PPO_CMD+=(--idle_queue_penalty "$IDLE_QUEUE_PENALTY")
+[ -n "$SAVE_EVERY" ]     && PPO_CMD+=(--save_every     "$SAVE_EVERY")
 [ -n "$SEED" ]          && PPO_CMD+=(--seed           "$SEED")
 [ -n "$SAVE_DIR" ]      && PPO_CMD+=(--save_dir       "$SAVE_DIR")
+PPO_CMD+=(--pipe_path "$STATE_PIPE" --action_pipe_path "$ACTION_PIPE")
 
 info "命令: ${PPO_CMD[*]}"
 
