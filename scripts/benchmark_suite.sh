@@ -89,12 +89,31 @@ grid_cols_for() {
 
 parse_scenario() {
     local scenario="$1"
-    if [[ ! "$scenario" =~ ^N([0-9]+)_(line|ring|star|grid|clustered|full)$ ]]; then
-        echo "[BENCH] 场景格式必须是 N<number>_<topology>，当前: $scenario" >&2
+    SCENARIO_LOAD_ARGS=()
+    SCENARIO_DYNAMIC_MODE="static"
+    if [[ ! "$scenario" =~ ^N([0-9]+)_(line|ring|star|grid|clustered|full)(.*)$ ]]; then
+        echo "[BENCH] 场景格式必须以 N<number>_<topology> 开头，当前: $scenario" >&2
         exit 1
     fi
     SCENARIO_N="${BASH_REMATCH[1]}"
     SCENARIO_TOPOLOGY="${BASH_REMATCH[2]}"
+    SCENARIO_SUFFIX="${BASH_REMATCH[3]}"
+    case "$SCENARIO_SUFFIX" in
+        "" ) ;;
+        _load_low) SCENARIO_LOAD_ARGS=(--traffic_rate 1.0) ;;
+        _load_medium) SCENARIO_LOAD_ARGS=(--traffic_rate 5.0) ;;
+        _load_high) SCENARIO_LOAD_ARGS=(--traffic_rate 10.0) ;;
+        _load_overload) SCENARIO_LOAD_ARGS=(--traffic_rate 20.0) ;;
+        _ramp) SCENARIO_LOAD_ARGS=(--enable_ramp_traffic true) ;;
+        _adaptive) SCENARIO_LOAD_ARGS=(--enable_adaptive_traffic true) ;;
+        _edge_toggle|_to_grid|_bridge_break|_node_dropout|_node_rejoin|_center_stress)
+            SCENARIO_DYNAMIC_MODE="${SCENARIO_SUFFIX#_}"
+            ;;
+        *)
+            echo "[BENCH] 不支持的场景后缀: $SCENARIO_SUFFIX（当前只支持 load/ramp/adaptive 和动态场景占位）" >&2
+            exit 1
+            ;;
+    esac
 }
 
 lookup_method() {
@@ -107,6 +126,9 @@ lookup_method() {
     fi
     IFS=$'\t' read -r METHOD_NAME METHOD_IMPLEMENTATION METHOD_NETWORK METHOD_RUNNER METHOD_MAC_MODE METHOD_ADAPTER METHOD_NEEDS_RL METHOD_DESC <<< "$line"
     METHOD_GROUP="$METHOD_NAME"
+    if [ "$METHOD_NAME" = "ppo_baseline" ]; then
+        METHOD_GROUP="baseline"
+    fi
 }
 
 MANIFEST="$ROOT_LOG/manifest.tsv"
@@ -148,7 +170,7 @@ for scenario in $SCENARIOS; do
             if [ "$METHOD_RUNNER" = "external" ]; then
                 mkdir -p "$method_dir/seed$seed"
             fi
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                 "$scenario" "$method" "$seed" "$method_dir/seed$seed" "$METHOD_IMPLEMENTATION" "$METHOD_NETWORK" \
                 "$METHOD_RUNNER" "$METHOD_MAC_MODE" "$METHOD_ADAPTER" "$METHOD_NEEDS_RL" \
                 "$TARGET_UPDATES" "$TARGET_FRAMES" "$SIM_TIME" >> "$MANIFEST"
@@ -166,6 +188,7 @@ for scenario in $SCENARIOS; do
                     --groups "$METHOD_GROUP"
                     --seeds "$SEEDS"
                     --heur_coef "$HEUR_COEF"
+                    "${SCENARIO_LOAD_ARGS[@]}"
                     --metrics_mode "$METRICS_MODE"
                     --jobs "$JOBS"
                     --stale_timeout "$STALE_TIMEOUT"
@@ -188,6 +211,57 @@ for scenario in $SCENARIOS; do
                         exit 1
                     fi
                 fi
+                ;;
+            omnet_only)
+                info "运行: scenario=$scenario method=$method implementation=$METHOD_IMPLEMENTATION network=$METHOD_NETWORK runner=omnet_only macMode=$METHOD_MAC_MODE adapter=$METHOD_ADAPTER"
+                RUNNING_OMNET=0
+                FAILED_OMNET=0
+                wait_omnet_slot() {
+                    while [ "$RUNNING_OMNET" -ge "$JOBS" ]; do
+                        if ! wait -n; then
+                            FAILED_OMNET=1
+                        fi
+                        RUNNING_OMNET=$((RUNNING_OMNET - 1))
+                    done
+                }
+                for seed in $SEEDS; do
+                    log_dir="$method_dir/seed$seed"
+                    metrics_dir="$log_dir/metrics"
+                    mkdir -p "$log_dir" "$metrics_dir"
+                    args=(
+                        "$SCRIPT_DIR/run_joint.sh"
+                        --sim_time "$SIM_TIME"
+                        --num_nodes "$SCENARIO_N"
+                        --num_slots "$NUM_SLOTS"
+                        --topology_mode "$SCENARIO_TOPOLOGY"
+                        --grid_cols "$grid_cols"
+                        --seed "$seed"
+                        --group "$method"
+                        --mac_mode "$METHOD_MAC_MODE"
+                        --skip_ppo
+                        --record_eventlog false
+                        "${SCENARIO_LOAD_ARGS[@]}"
+                        --metrics_mode "$METRICS_MODE"
+                        --stale_timeout "$STALE_TIMEOUT"
+                        --log_dir "$log_dir"
+                        --metrics_dir "$metrics_dir"
+                    )
+                    [ "$DRY_RUN" = true ] && args+=(--dry_run)
+                    if [ "$DRY_RUN" = true ]; then
+                        bash "${args[@]}"
+                    else
+                        wait_omnet_slot
+                        bash "${args[@]}" &
+                        RUNNING_OMNET=$((RUNNING_OMNET + 1))
+                    fi
+                done
+                while [ "$RUNNING_OMNET" -gt 0 ]; do
+                    if ! wait -n; then
+                        FAILED_OMNET=1
+                    fi
+                    RUNNING_OMNET=$((RUNNING_OMNET - 1))
+                done
+                [ "$FAILED_OMNET" -eq 0 ] || exit 1
                 ;;
             external)
                 info "跳过 external 方法占位: $method，目录已创建: $method_dir"

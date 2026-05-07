@@ -180,6 +180,15 @@ void DynamicTDMA::initialize() {
   if (hasPar("rlActionPipePath")) {
     sRlActionPipePath = par("rlActionPipePath").stdstringValue();
   }
+  if (hasPar("macMode")) {
+    macMode = lowerAscii(par("macMode").stdstringValue());
+  }
+  if (macMode != "dynamic_tdma" && macMode != "heuristic_only" &&
+      macMode != "plain_tdma") {
+    EV << "Unknown macMode=" << macMode
+       << ", fallback to dynamic_tdma" << endl;
+    macMode = "dynamic_tdma";
+  }
   lastGeneratedThisFrame = 0;
   prevQueueSize = 0;
 
@@ -342,9 +351,11 @@ void DynamicTDMA::initialize() {
   // 初始化 CTS 汇总缓存
   resetCtsAggregation();
 
-  // 初始化 RL 命名管道（所有节点共用，仅第一次执行）
-  initRlPipe();
-  initRlActionPipe();
+  // 只有学习模式需要连接 Python FIFO；传统/启发式基线必须纯 OMNeT++ 运行。
+  if (macMode == "dynamic_tdma") {
+    initRlPipe();
+    initRlActionPipe();
+  }
 }
 
 void DynamicTDMA::handleMessage(cMessage *msg) {
@@ -1305,6 +1316,11 @@ void DynamicTDMA::scheduleRequests() {
     return;
   }
 
+  if (macMode == "plain_tdma") {
+    schedulePlainTdmaRequests();
+    return;
+  }
+
   // 挑选要申请时隙的包（最多 numDataSlots 个）
   // 简单策略：遍历队列，取出高优先级，再取低优先级
   // 注意：这里只是制定计划，暂时不从队列 pop，等到 sendData 时才 pop
@@ -1376,7 +1392,7 @@ void DynamicTDMA::scheduleRequests() {
     // avoidSlotsNextSchedule 退避效果通过 slotOrder 仍然完整生效
     double rlAlpha;
     double reqProb;
-    if (getRlActionProb(slot, rlAlpha)) {
+    if (macMode != "heuristic_only" && getRlActionProb(slot, rlAlpha)) {
       // 方向 D：开启自适应时按邻居密度压缩乘数上限；关闭时沿用固定 2.0
       double multMax = 2.0;
       if (adaptiveMultEnabled) {
@@ -1412,6 +1428,36 @@ void DynamicTDMA::scheduleRequests() {
       requestedThisFrame++;
   }
   totalSlotRequestCount += requestedThisFrame;
+}
+
+void DynamicTDMA::schedulePlainTdmaRequests() {
+  int ownerSlot = (numDataSlots > 0) ? (myId % numDataSlots) : -1;
+  if (ownerSlot < 0)
+    return;
+
+  size_t selected = 0;
+  for (size_t i = 1; i < packetQueue.size(); i++) {
+    if (packetQueue[i].priority > packetQueue[selected].priority) {
+      selected = i;
+    }
+  }
+
+  const PendingPacket &pkt = packetQueue[selected];
+  double waitTime = (simTime() - pkt.genTime).dbl();
+  double basePrio = (pkt.priority >= 1) ? 0.8 : 0.4;
+  double dynamicPrio = std::min(0.99, basePrio + (waitTime * 0.1));
+
+  reqCandidateCount++;
+  reqSentCount++;
+  reqProbSum += 1.0;
+  myDesiredTargets[ownerSlot] = pkt.destId;
+  myPriorities[ownerSlot] = dynamicPrio;
+  myHeurProbs[ownerSlot] = 1.0;
+  totalSlotRequestCount++;
+
+  EV << "PlainTDMA: Node " << myId << " requesting owner Slot "
+     << ownerSlot << " for Packet ID=" << pkt.id
+     << " (Dest=" << pkt.destId << ", Prio=" << dynamicPrio << ")" << endl;
 }
 
 void DynamicTDMA::runDeepLearningModel() {
@@ -1855,6 +1901,8 @@ void DynamicTDMA::broadcastPacket(cPacket *pkt) {
 // ------------------------------------------------------------------
 
 void DynamicTDMA::initRlPipe() {
+  if (macMode != "dynamic_tdma")
+    return;
   if (sRlPipeFd >= 0)
     return; // 已经由其他节点初始化过
 
@@ -1879,6 +1927,8 @@ void DynamicTDMA::initRlPipe() {
 }
 
 void DynamicTDMA::writeRlFeatures(const RlFrameFeatures &f) {
+  if (macMode != "dynamic_tdma")
+    return;
   // 若管道尚未打开，限速重连（每 10 帧尝试一次，避免高频 open() 系统调用）
   if (sRlPipeFd < 0) {
     if ((sRlReconnectCounter++ % 10) != 0)
@@ -1969,6 +2019,8 @@ void DynamicTDMA::writeRlFeatures(const RlFrameFeatures &f) {
 // ------------------------------------------------------------------
 
 void DynamicTDMA::initRlActionPipe() {
+  if (macMode != "dynamic_tdma")
+    return;
   if (sRlActionPipeFd >= 0)
     return;
 
@@ -2074,6 +2126,8 @@ bool DynamicTDMA::parseLastRlActionLine(std::string &buf) {
 }
 
 void DynamicTDMA::readRlActions() {
+  if (macMode != "dynamic_tdma")
+    return;
   // 尝试打开管道（限速重连）
   if (sRlActionPipeFd < 0) {
     if ((sRlActionReconnectCounter++ % 10) != 0)

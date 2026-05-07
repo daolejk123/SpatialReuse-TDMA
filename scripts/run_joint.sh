@@ -42,6 +42,11 @@
 #   --record_eventlog BOOL 写入临时 ini 的 record-eventlog
 #   --topology_mode MODE 写入临时 ini 的 topologyMode（line/ring/star/grid/clustered/full）
 #   --grid_cols N        grid 拓扑列数
+#   --mac_mode MODE      dynamic_tdma|heuristic_only|plain_tdma（默认 dynamic_tdma）
+#   --skip_ppo           仅运行 OMNeT++，用于传统/启发式非学习基线
+#   --traffic_rate F     写入 trafficArrivalRate
+#   --enable_ramp_traffic BOOL 写入 enableRampTraffic
+#   --enable_adaptive_traffic BOOL 写入 enableAdaptiveTraffic
 #   --log_dir DIR        日志目录（默认 logs/<timestamp>）
 #   --gui                使用 GUI 模式运行仿真（默认 Cmdenv 命令行模式）
 #   --rebuild            强制重新编译 DynamicTDMA
@@ -108,6 +113,14 @@ ADAPTIVE_MULTIPLIER=""
 RECORD_EVENTLOG=""
 TOPOLOGY_MODE=""
 GRID_COLS=""
+MAC_MODE="dynamic_tdma"
+SKIP_PPO=false
+TRAFFIC_RATE=""
+ENABLE_RAMP_TRAFFIC=""
+ENABLE_ADAPTIVE_TRAFFIC=""
+RAMP_RATE_START=""
+RAMP_RATE_STEP=""
+RAMP_RATE_MAX=""
 
 # --------------------------------------------------------------------------
 # 参数解析
@@ -152,6 +165,14 @@ while [[ $# -gt 0 ]]; do
         --record_eventlog) RECORD_EVENTLOG="$2"; shift 2 ;;
         --topology_mode) TOPOLOGY_MODE="$2"; shift 2 ;;
         --grid_cols)    GRID_COLS="$2"; shift 2 ;;
+        --mac_mode)     MAC_MODE="$2"; shift 2 ;;
+        --skip_ppo)     SKIP_PPO=true; shift ;;
+        --traffic_rate) TRAFFIC_RATE="$2"; shift 2 ;;
+        --enable_ramp_traffic) ENABLE_RAMP_TRAFFIC="$2"; shift 2 ;;
+        --enable_adaptive_traffic) ENABLE_ADAPTIVE_TRAFFIC="$2"; shift 2 ;;
+        --ramp_rate_start) RAMP_RATE_START="$2"; shift 2 ;;
+        --ramp_rate_step) RAMP_RATE_STEP="$2"; shift 2 ;;
+        --ramp_rate_max) RAMP_RATE_MAX="$2"; shift 2 ;;
         --gui)          USE_GUI=true;     shift ;;
         --rebuild)      REBUILD=true;     shift ;;
         --dry_run)      DRY_RUN=true;     shift ;;
@@ -184,6 +205,10 @@ if [ -n "$TOPOLOGY_MODE" ]; then
         *) error "topology_mode 只能是 line、ring、star、grid、clustered 或 full，当前: $TOPOLOGY_MODE"; exit 1 ;;
     esac
 fi
+case "$MAC_MODE" in
+    dynamic_tdma|heuristic_only|plain_tdma) ;;
+    *) error "mac_mode 只能是 dynamic_tdma、heuristic_only 或 plain_tdma，当前: $MAC_MODE"; exit 1 ;;
+esac
 
 # --------------------------------------------------------------------------
 # 环境检查
@@ -247,6 +272,11 @@ info "num_slots    = $NUM_SLOTS"
 info "num_nodes    = $NUM_NODES"
 [ -n "$TOPOLOGY_MODE" ] && info "topology_mode= $TOPOLOGY_MODE"
 [ -n "$GRID_COLS" ] && info "grid_cols    = $GRID_COLS"
+info "mac_mode     = $MAC_MODE"
+info "skip_ppo     = $SKIP_PPO"
+[ -n "$TRAFFIC_RATE" ] && info "traffic_rate = $TRAFFIC_RATE"
+[ -n "$ENABLE_RAMP_TRAFFIC" ] && info "ramp_traffic = $ENABLE_RAMP_TRAFFIC"
+[ -n "$ENABLE_ADAPTIVE_TRAFFIC" ] && info "adaptive_traffic = $ENABLE_ADAPTIVE_TRAFFIC"
 info "sync_interval= $SYNC_INTERVAL  (0=异步, N>0=每N帧同步)"
 info "sync_timeout = $SYNC_TIMEOUT s"
 info "load_ckpt    = ${LOAD_CKPT:-（新训练，不加载权重）}"
@@ -254,8 +284,10 @@ info "log_dir      = $LOG_DIR"
 info "use_gui      = $USE_GUI"
 [ -n "$METRICS_DIR" ] && info "metrics_dir  = $METRICS_DIR"
 info "metrics_mode = $METRICS_MODE"
-info "state_pipe   = $STATE_PIPE"
-info "action_pipe  = $ACTION_PIPE"
+if [ "$SKIP_PPO" = false ]; then
+    info "state_pipe   = $STATE_PIPE"
+    info "action_pipe  = $ACTION_PIPE"
+fi
 [ -n "$ENT_COEF" ]    && info "ent_coef     = $ENT_COEF"
 [ -n "$PPO_EPOCHS" ]  && info "ppo_epochs   = $PPO_EPOCHS"
 [ -n "$R_GAMMA" ]     && info "r_gamma      = $R_GAMMA"
@@ -339,6 +371,7 @@ write_status() {
         printf 'seed\t%s\n' "${SEED:-}"
         printf 'num_nodes\t%s\n' "$NUM_NODES"
         printf 'topology_mode\t%s\n' "$TOPOLOGY_MODE"
+        printf 'mac_mode\t%s\n' "$MAC_MODE"
         printf 'target_updates\t%s\n' "$TARGET_UPDATES"
         printf 'target_frames\t%s\n' "$TARGET_FRAMES"
         printf 'python_pid\t%s\n' "$PYTHON_PID"
@@ -421,6 +454,11 @@ cleanup() {
     {
         echo "wall_seconds=$(( $(date +%s) - RUN_START_TS ))"
         echo "exit_code=$exit_code"
+        echo "num_nodes=$NUM_NODES"
+        echo "num_slots=$NUM_SLOTS"
+        echo "mac_mode=$MAC_MODE"
+        [ -n "$TOPOLOGY_MODE" ] && echo "topology_mode=$TOPOLOGY_MODE"
+        [ -n "$TRAFFIC_RATE" ] && echo "traffic_rate=$TRAFFIC_RATE"
         [ -f "$LOG_DIR/python.log" ] && grep -E '^\[PPO\]' "$LOG_DIR/python.log" | tail -1 | sed 's/^/last_ppo=/'
         [ -f "$LOG_DIR/sim.log" ] && grep -E 'Speed:' "$LOG_DIR/sim.log" | tail -1 | sed 's/^ *//;s/^/last_sim_speed=/'
         [ -f "$RUN_STATUS" ] && awk -F '\t' '$1=="status"{print "run_status="$2} $1=="message"{print "run_message="$2}' "$RUN_STATUS"
@@ -451,10 +489,12 @@ run_cmd() {
 # --------------------------------------------------------------------------
 # 清理旧管道
 # --------------------------------------------------------------------------
-section "初始化命名管道"
-info "清理旧管道..."
-run_cmd rm -f "$STATE_PIPE" "$ACTION_PIPE"
-info "管道已清理（将由 Python 在启动时重新创建）"
+if [ "$SKIP_PPO" = false ]; then
+    section "初始化命名管道"
+    info "清理旧管道..."
+    run_cmd rm -f "$STATE_PIPE" "$ACTION_PIPE"
+    info "管道已清理（将由 Python 在启动时重新创建）"
+fi
 
 # --------------------------------------------------------------------------
 # 创建日志目录
@@ -501,6 +541,13 @@ set_or_append_ini() {
 [ -n "$ADAPTIVE_MULTIPLIER" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.adaptiveMultiplier[[:space:]]*=' "**.nodes[*].adaptiveMultiplier = ${ADAPTIVE_MULTIPLIER}"
 [ -n "$TOPOLOGY_MODE" ] && set_or_append_ini '^\*\.topologyMode[[:space:]]*=' "*.topologyMode = \"${TOPOLOGY_MODE}\""
 [ -n "$GRID_COLS" ] && set_or_append_ini '^\*\.gridCols[[:space:]]*=' "*.gridCols = ${GRID_COLS}"
+set_or_append_ini '^\*\*\.nodes\[\*\]\.macMode[[:space:]]*=' "**.nodes[*].macMode = \"${MAC_MODE}\""
+[ -n "$TRAFFIC_RATE" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.trafficArrivalRate[[:space:]]*=' "**.nodes[*].trafficArrivalRate = ${TRAFFIC_RATE}"
+[ -n "$ENABLE_RAMP_TRAFFIC" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.enableRampTraffic[[:space:]]*=' "**.nodes[*].enableRampTraffic = ${ENABLE_RAMP_TRAFFIC}"
+[ -n "$ENABLE_ADAPTIVE_TRAFFIC" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.enableAdaptiveTraffic[[:space:]]*=' "**.nodes[*].enableAdaptiveTraffic = ${ENABLE_ADAPTIVE_TRAFFIC}"
+[ -n "$RAMP_RATE_START" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.rampRateStart[[:space:]]*=' "**.nodes[*].rampRateStart = ${RAMP_RATE_START}"
+[ -n "$RAMP_RATE_STEP" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.rampRateStep[[:space:]]*=' "**.nodes[*].rampRateStep = ${RAMP_RATE_STEP}"
+[ -n "$RAMP_RATE_MAX" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.rampRateMax[[:space:]]*=' "**.nodes[*].rampRateMax = ${RAMP_RATE_MAX}"
 set_or_append_ini '^\*\*\.nodes\[\*\]\.metricsMode[[:space:]]*=' "**.nodes[*].metricsMode = \"${METRICS_MODE}\""
 set_or_append_ini '^\*\*\.nodes\[\*\]\.rlStatePipePath[[:space:]]*=' "**.nodes[*].rlStatePipePath = \"${STATE_PIPE}\""
 set_or_append_ini '^\*\*\.nodes\[\*\]\.rlActionPipePath[[:space:]]*=' "**.nodes[*].rlActionPipePath = \"${ACTION_PIPE}\""
@@ -513,6 +560,7 @@ info "临时 ini: $(basename "$TEMP_INI")  (rlSyncInterval=$SYNC_INTERVAL, rlSyn
 # --------------------------------------------------------------------------
 # 启动 Python 训练器（后台）
 # --------------------------------------------------------------------------
+if [ "$SKIP_PPO" = false ]; then
 section "启动 Python 训练器"
 
 LOAD_CKPT_ARG=""
@@ -593,6 +641,11 @@ if [ "$DRY_RUN" = false ]; then
         exit 1
     fi
 fi
+else
+    section "跳过 Python 训练器"
+    info "非学习基线模式：仅运行 OMNeT++，不启动 PPO，不创建 FIFO"
+    write_status "starting" "" "omnet-only mode"
+fi
 
 # --------------------------------------------------------------------------
 # 启动 OMNeT++ 仿真（前台，输出同时写入日志）
@@ -613,14 +666,19 @@ if [ "$DRY_RUN" = false ]; then
     "${SIM_CMD[@]}" 2>&1 | tee "$LOG_DIR/sim.log" &
     SIM_PID=$!
     info "OMNeT++ 仿真已启动 (PID $SIM_PID)"
-    write_status "running" "" "joint simulation running"
+    if [ "$SKIP_PPO" = true ]; then
+        write_status "running" "" "omnet-only simulation running"
+    else
+        write_status "running" "" "joint simulation running"
+    fi
 
     # --------------------------------------------------------------------------
     # 监控双端进程：任意一端退出则停止另一端
     # --------------------------------------------------------------------------
     section "联合仿真运行中（Ctrl+C 可停止）"
-    info "Python PID: $PYTHON_PID  |  仿真 PID: $SIM_PID"
-    info "Python 日志: $LOG_DIR/python.log"
+    [ "$SKIP_PPO" = false ] && info "Python PID: $PYTHON_PID  |  仿真 PID: $SIM_PID"
+    [ "$SKIP_PPO" = true ] && info "仿真 PID: $SIM_PID"
+    [ "$SKIP_PPO" = false ] && info "Python 日志: $LOG_DIR/python.log"
     info "仿真  日志: $LOG_DIR/sim.log"
     echo ""
 
@@ -629,12 +687,17 @@ if [ "$DRY_RUN" = false ]; then
     while true; do
         LOOP_COUNT=$((LOOP_COUNT + 1))
         if [ $((LOOP_COUNT % 10)) -eq 0 ]; then
-            write_status "running" "" "joint simulation running"
+            if [ "$SKIP_PPO" = true ]; then
+                write_status "running" "" "omnet-only simulation running"
+            else
+                write_status "running" "" "joint simulation running"
+            fi
         fi
 
         AGE_PY=$(file_age_sec "$LOG_DIR/python.log")
         AGE_SIM=$(file_age_sec "$LOG_DIR/sim.log")
-        if [ "$AGE_PY" -ge "$STALE_TIMEOUT" ] && [ "$AGE_SIM" -ge "$STALE_TIMEOUT" ]; then
+        if { [ "$SKIP_PPO" = true ] && [ "$AGE_SIM" -ge "$STALE_TIMEOUT" ]; } ||
+           { [ "$SKIP_PPO" = false ] && [ "$AGE_PY" -ge "$STALE_TIMEOUT" ] && [ "$AGE_SIM" -ge "$STALE_TIMEOUT" ]; }; then
             error "Python 与仿真日志超过 ${STALE_TIMEOUT}s 无更新，判定卡死"
             write_status "stale" "124" "logs stale for ${STALE_TIMEOUT}s"
             RUN_EXIT_CODE=124
@@ -648,7 +711,7 @@ if [ "$DRY_RUN" = false ]; then
             info "OMNeT++ 仿真已正常结束 (exit code: $SIM_EXIT)"
             # 给 Python 2 秒时间完成最后的保存
             sleep 2
-            if [ "$SIM_EXIT" -eq 0 ] && { [ -z "$TARGET_UPDATES$TARGET_FRAMES" ] || target_reached; }; then
+            if [ "$SIM_EXIT" -eq 0 ] && { [ "$SKIP_PPO" = true ] || [ -z "$TARGET_UPDATES$TARGET_FRAMES" ] || target_reached; }; then
                 write_status "sim_completed" "0" "simulation completed"
             else
                 local_exit="$SIM_EXIT"
@@ -657,6 +720,11 @@ if [ "$DRY_RUN" = false ]; then
                 RUN_EXIT_CODE="$local_exit"
             fi
             break
+        fi
+
+        if [ "$SKIP_PPO" = true ]; then
+            sleep 1
+            continue
         fi
 
         # 检查 Python 是否崩溃

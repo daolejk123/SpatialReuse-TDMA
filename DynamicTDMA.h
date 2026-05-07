@@ -174,6 +174,7 @@ protected:
   std::string featureJsonlPath;
   bool metricsEnabled = true;
   bool featureTraceEnabled = true;
+  std::string macMode = "dynamic_tdma";
 
   // RL 同步参数（从 omnetpp.ini 读取）
   // rlSyncInterval = 0：异步（不等待，原有行为）
@@ -239,6 +240,7 @@ protected:
   // 辅助函数
   void generateTraffic();      // 生成新业务
   void scheduleRequests();     // 智能调度 (替代 runDeepLearningModel)
+  void schedulePlainTdmaRequests();
   void runDeepLearningModel(); // (Deprecated)
   void updateOccupancyTable();
   void broadcastPacket(cPacket *pkt);

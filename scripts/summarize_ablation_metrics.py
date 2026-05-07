@@ -97,7 +97,7 @@ SUMMARY_METRICS = [
     "energy_proxy",
 ]
 
-SCENARIO_RE = re.compile(r"^N(?P<num_nodes>\d+)_(?P<topology>.+)$")
+SCENARIO_RE = re.compile(r"^N(?P<num_nodes>\d+)_(?P<topology>line|ring|star|grid|clustered|full)(?:_.*)?$")
 
 
 def fnum(value: str | float | int | None) -> float:
@@ -421,11 +421,11 @@ def summarize_run(scenario: str, group: str, seed: int, run_dir: Path) -> dict[s
         )
 
     final_frame = row.get("final_frame")
-    has_core_outputs = (
+    has_ppo_outputs = (
         float(row.get("ppo_frame", 0.0)) > 0.0
         and float(row.get("ppo_update", 0.0)) > 0.0
-        and float(row.get("slot_final_nodes", 0.0)) > 0.0
     )
+    has_metrics_outputs = float(row.get("slot_final_nodes", 0.0)) > 0.0
     full_sim_complete = (
         sim_completed(run_dir / "sim.log")
         and final_frame == row.get("fairness_final_frame")
@@ -434,7 +434,9 @@ def summarize_run(scenario: str, group: str, seed: int, run_dir: Path) -> dict[s
     # Target-limited runs intentionally stop OMNeT++ once PPO reaches the requested
     # update/frame budget, so the CSV writers may flush at slightly different final frames.
     target_complete = target_completed(run_dir / "python.log")
-    complete = has_core_outputs and (full_sim_complete or target_complete)
+    complete = has_metrics_outputs and (
+        full_sim_complete or (has_ppo_outputs and target_complete)
+    )
     row["complete"] = complete
     return row
 

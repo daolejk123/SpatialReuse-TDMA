@@ -34,6 +34,11 @@ simple DynamicTDMA
         // N > 0 = 每 N 帧强制等待 Python 回传一次动作，保证 on-policy 对齐
         int rlSyncInterval = default(0);
         double rlSyncTimeoutSec = default(5.0); // 同步等待超时（秒），超时后回退到启发式
+        // MAC 协议模式：
+        // dynamic_tdma = 当前 PPO/启发式混合动态 TDMA；
+        // heuristic_only = 仅使用当前启发式申请概率，不读取 PPO 动作；
+        // plain_tdma = 固定 owner slot 的传统 TDMA 基线。
+        string macMode = default("dynamic_tdma");
 
         // 方向 D：邻居密度自适应 clamp 乘数
         // false = 所有节点使用固定乘数上限 2.0（原行为）
