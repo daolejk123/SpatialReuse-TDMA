@@ -47,6 +47,13 @@
 #   --traffic_rate F     写入 trafficArrivalRate
 #   --enable_ramp_traffic BOOL 写入 enableRampTraffic
 #   --enable_adaptive_traffic BOOL 写入 enableAdaptiveTraffic
+#   --dynamic_topology_mode MODE 写入 dynamicTopologyMode
+#   --logical_topology_mode MODE 写入 logicalTopologyMode
+#   --perturb_at_frame N  写入 perturbAtFrame
+#   --recovery_at_frame N 写入 recoveryAtFrame
+#   --dropout_ratio F     写入 dropoutRatio
+#   --edge_toggle_ratio F 写入 edgeToggleRatio
+#   --switch_topology_mode MODE 写入 switchTopologyMode
 #   --log_dir DIR        日志目录（默认 logs/<timestamp>）
 #   --gui                使用 GUI 模式运行仿真（默认 Cmdenv 命令行模式）
 #   --rebuild            强制重新编译 DynamicTDMA
@@ -121,6 +128,13 @@ ENABLE_ADAPTIVE_TRAFFIC=""
 RAMP_RATE_START=""
 RAMP_RATE_STEP=""
 RAMP_RATE_MAX=""
+DYNAMIC_TOPOLOGY_MODE=""
+LOGICAL_TOPOLOGY_MODE=""
+PERTURB_AT_FRAME=""
+RECOVERY_AT_FRAME=""
+DROPOUT_RATIO=""
+EDGE_TOGGLE_RATIO=""
+SWITCH_TOPOLOGY_MODE=""
 
 # --------------------------------------------------------------------------
 # 参数解析
@@ -173,6 +187,13 @@ while [[ $# -gt 0 ]]; do
         --ramp_rate_start) RAMP_RATE_START="$2"; shift 2 ;;
         --ramp_rate_step) RAMP_RATE_STEP="$2"; shift 2 ;;
         --ramp_rate_max) RAMP_RATE_MAX="$2"; shift 2 ;;
+        --dynamic_topology_mode) DYNAMIC_TOPOLOGY_MODE="$2"; shift 2 ;;
+        --logical_topology_mode) LOGICAL_TOPOLOGY_MODE="$2"; shift 2 ;;
+        --perturb_at_frame) PERTURB_AT_FRAME="$2"; shift 2 ;;
+        --recovery_at_frame) RECOVERY_AT_FRAME="$2"; shift 2 ;;
+        --dropout_ratio) DROPOUT_RATIO="$2"; shift 2 ;;
+        --edge_toggle_ratio) EDGE_TOGGLE_RATIO="$2"; shift 2 ;;
+        --switch_topology_mode) SWITCH_TOPOLOGY_MODE="$2"; shift 2 ;;
         --gui)          USE_GUI=true;     shift ;;
         --rebuild)      REBUILD=true;     shift ;;
         --dry_run)      DRY_RUN=true;     shift ;;
@@ -209,6 +230,12 @@ case "$MAC_MODE" in
     dynamic_tdma|heuristic_only|plain_tdma) ;;
     *) error "mac_mode 只能是 dynamic_tdma、heuristic_only 或 plain_tdma，当前: $MAC_MODE"; exit 1 ;;
 esac
+if [ -n "$DYNAMIC_TOPOLOGY_MODE" ]; then
+    case "$DYNAMIC_TOPOLOGY_MODE" in
+        static|edge_toggle|topology_switch|node_dropout|node_rejoin) ;;
+        *) error "dynamic_topology_mode 非法: $DYNAMIC_TOPOLOGY_MODE"; exit 1 ;;
+    esac
+fi
 
 # --------------------------------------------------------------------------
 # 环境检查
@@ -274,6 +301,10 @@ info "num_nodes    = $NUM_NODES"
 [ -n "$GRID_COLS" ] && info "grid_cols    = $GRID_COLS"
 info "mac_mode     = $MAC_MODE"
 info "skip_ppo     = $SKIP_PPO"
+[ -n "$DYNAMIC_TOPOLOGY_MODE" ] && info "dynamic_topology = $DYNAMIC_TOPOLOGY_MODE"
+[ -n "$LOGICAL_TOPOLOGY_MODE" ] && info "logical_topology = $LOGICAL_TOPOLOGY_MODE"
+[ -n "$PERTURB_AT_FRAME" ] && info "perturb_at_frame = $PERTURB_AT_FRAME"
+[ -n "$RECOVERY_AT_FRAME" ] && info "recovery_at_frame = $RECOVERY_AT_FRAME"
 [ -n "$TRAFFIC_RATE" ] && info "traffic_rate = $TRAFFIC_RATE"
 [ -n "$ENABLE_RAMP_TRAFFIC" ] && info "ramp_traffic = $ENABLE_RAMP_TRAFFIC"
 [ -n "$ENABLE_ADAPTIVE_TRAFFIC" ] && info "adaptive_traffic = $ENABLE_ADAPTIVE_TRAFFIC"
@@ -458,6 +489,8 @@ cleanup() {
         echo "num_slots=$NUM_SLOTS"
         echo "mac_mode=$MAC_MODE"
         [ -n "$TOPOLOGY_MODE" ] && echo "topology_mode=$TOPOLOGY_MODE"
+        [ -n "$DYNAMIC_TOPOLOGY_MODE" ] && echo "dynamic_topology_mode=$DYNAMIC_TOPOLOGY_MODE"
+        [ -n "$LOGICAL_TOPOLOGY_MODE" ] && echo "logical_topology_mode=$LOGICAL_TOPOLOGY_MODE"
         [ -n "$TRAFFIC_RATE" ] && echo "traffic_rate=$TRAFFIC_RATE"
         [ -f "$LOG_DIR/python.log" ] && grep -E '^\[PPO\]' "$LOG_DIR/python.log" | tail -1 | sed 's/^/last_ppo=/'
         [ -f "$LOG_DIR/sim.log" ] && grep -E 'Speed:' "$LOG_DIR/sim.log" | tail -1 | sed 's/^ *//;s/^/last_sim_speed=/'
@@ -542,6 +575,14 @@ set_or_append_ini() {
 [ -n "$TOPOLOGY_MODE" ] && set_or_append_ini '^\*\.topologyMode[[:space:]]*=' "*.topologyMode = \"${TOPOLOGY_MODE}\""
 [ -n "$GRID_COLS" ] && set_or_append_ini '^\*\.gridCols[[:space:]]*=' "*.gridCols = ${GRID_COLS}"
 set_or_append_ini '^\*\*\.nodes\[\*\]\.macMode[[:space:]]*=' "**.nodes[*].macMode = \"${MAC_MODE}\""
+[ -n "$DYNAMIC_TOPOLOGY_MODE" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.dynamicTopologyMode[[:space:]]*=' "**.nodes[*].dynamicTopologyMode = \"${DYNAMIC_TOPOLOGY_MODE}\""
+[ -n "$LOGICAL_TOPOLOGY_MODE" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.logicalTopologyMode[[:space:]]*=' "**.nodes[*].logicalTopologyMode = \"${LOGICAL_TOPOLOGY_MODE}\""
+[ -n "$PERTURB_AT_FRAME" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.perturbAtFrame[[:space:]]*=' "**.nodes[*].perturbAtFrame = ${PERTURB_AT_FRAME}"
+[ -n "$RECOVERY_AT_FRAME" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.recoveryAtFrame[[:space:]]*=' "**.nodes[*].recoveryAtFrame = ${RECOVERY_AT_FRAME}"
+[ -n "$DROPOUT_RATIO" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.dropoutRatio[[:space:]]*=' "**.nodes[*].dropoutRatio = ${DROPOUT_RATIO}"
+[ -n "$EDGE_TOGGLE_RATIO" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.edgeToggleRatio[[:space:]]*=' "**.nodes[*].edgeToggleRatio = ${EDGE_TOGGLE_RATIO}"
+[ -n "$SWITCH_TOPOLOGY_MODE" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.switchTopologyMode[[:space:]]*=' "**.nodes[*].switchTopologyMode = \"${SWITCH_TOPOLOGY_MODE}\""
+[ -n "$SEED" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.dynamicTopologySeed[[:space:]]*=' "**.nodes[*].dynamicTopologySeed = ${SEED}"
 [ -n "$TRAFFIC_RATE" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.trafficArrivalRate[[:space:]]*=' "**.nodes[*].trafficArrivalRate = ${TRAFFIC_RATE}"
 [ -n "$ENABLE_RAMP_TRAFFIC" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.enableRampTraffic[[:space:]]*=' "**.nodes[*].enableRampTraffic = ${ENABLE_RAMP_TRAFFIC}"
 [ -n "$ENABLE_ADAPTIVE_TRAFFIC" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.enableAdaptiveTraffic[[:space:]]*=' "**.nodes[*].enableAdaptiveTraffic = ${ENABLE_ADAPTIVE_TRAFFIC}"

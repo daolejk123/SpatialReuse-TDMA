@@ -23,12 +23,14 @@ PPO_RE = re.compile(
     r"(?:\s+heur_dev=(?P<heur_dev>[+-]?\d+(?:\.\d+)?))?"
 )
 
-GROUP_ORDER = ["baseline", "D", "B", "DB"]
+GROUP_ORDER = ["plain_tdma", "heuristic_only", "ppo_baseline", "baseline", "D", "B", "DB"]
 
 RUN_FIELDS = [
     "scenario",
     "num_nodes",
     "topology_mode",
+    "logical_topology_mode",
+    "dynamic_topology_mode",
     "group",
     "seed",
     "complete",
@@ -63,6 +65,17 @@ RUN_FIELDS = [
     "fair_goodput",
     "starvation_ratio",
     "energy_proxy",
+    "dynamic_event_count",
+    "perturb_frame",
+    "recovery_frame",
+    "active_nodes_min",
+    "active_edges_min",
+    "pdr_pre100",
+    "pdr_post100",
+    "pdr_drop_post100",
+    "queue_peak_post100",
+    "jain_post100",
+    "jain_recovery100",
     "metrics_dir",
 ]
 
@@ -95,6 +108,13 @@ SUMMARY_METRICS = [
     "fair_goodput",
     "starvation_ratio",
     "energy_proxy",
+    "dynamic_event_count",
+    "active_nodes_min",
+    "active_edges_min",
+    "pdr_drop_post100",
+    "queue_peak_post100",
+    "jain_post100",
+    "jain_recovery100",
 ]
 
 SCENARIO_RE = re.compile(r"^N(?P<num_nodes>\d+)_(?P<topology>line|ring|star|grid|clustered|full)(?:_.*)?$")
@@ -278,6 +298,22 @@ def summarize_fairness(path: Path) -> dict[str, float]:
     }
 
 
+def summarize_topology_events(path: Path) -> dict[str, float]:
+    if not path.exists():
+        return {}
+    rows = read_csv(path)
+    if not rows:
+        return {}
+    perturb = [r for r in rows if r.get("event") == "perturb"]
+    recover = [r for r in rows if r.get("event") == "recover"]
+    out: dict[str, float] = {"dynamic_event_count": float(len(rows))}
+    if perturb:
+        out["perturb_frame"] = fnum(perturb[0].get("frame"))
+    if recover:
+        out["recovery_frame"] = fnum(recover[0].get("frame"))
+    return out
+
+
 def summarize_frame_metrics(path: Path) -> dict[str, float]:
     if not path.exists():
         return {}
@@ -289,6 +325,8 @@ def summarize_frame_metrics(path: Path) -> dict[str, float]:
     num_slots = math.nan
     util_sum = 0.0
     util_count = 0
+    active_nodes_min = math.nan
+    active_edges_min = math.nan
     last_row: dict[str, str] | None = None
     with path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -302,6 +340,12 @@ def summarize_frame_metrics(path: Path) -> dict[str, float]:
                 num_slots = max(num_slots if not math.isnan(num_slots) else 0.0, float(len(row["Bown"])))
                 util_sum += row["Bown"].count("1")
                 util_count += 1
+            if row.get("active_nodes") not in (None, ""):
+                val = fnum(row.get("active_nodes"))
+                active_nodes_min = val if math.isnan(active_nodes_min) else min(active_nodes_min, val)
+            if row.get("active_edges") not in (None, ""):
+                val = fnum(row.get("active_edges"))
+                active_edges_min = val if math.isnan(active_edges_min) else min(active_edges_min, val)
             last_row = row
     if not last_row:
         return {}
@@ -319,6 +363,61 @@ def summarize_frame_metrics(path: Path) -> dict[str, float]:
         "Wt_p95": percentile(wt_values, 95),
         "num_data_slots": num_slots,
         "frame_metrics_rows": float(count),
+        "active_nodes_min": active_nodes_min,
+        "active_edges_min": active_edges_min,
+    }
+
+
+def summarize_dynamic_windows(fairness_path: Path, events: dict[str, float]) -> dict[str, float]:
+    perturb_frame = events.get("perturb_frame", math.nan)
+    if math.isnan(perturb_frame) or not fairness_path.exists():
+        return {}
+    rows = read_csv(fairness_path)
+    if not rows:
+        return {}
+
+    def window(start: float, end: float | None) -> list[dict[str, str]]:
+        selected = []
+        for row in rows:
+            frame = fnum(row.get("frame"))
+            if frame < start:
+                continue
+            if end is not None and frame >= end:
+                continue
+            selected.append(row)
+        return selected
+
+    pre = window(max(0.0, perturb_frame - 100.0), perturb_frame)
+    post = window(perturb_frame, perturb_frame + 100.0)
+    recovery_frame = events.get("recovery_frame", math.nan)
+    recovery = [] if math.isnan(recovery_frame) else window(recovery_frame, recovery_frame + 100.0)
+
+    def pdr(selected: list[dict[str, str]]) -> float:
+        arrivals = sum(fnum(r.get("sum_arrivals")) for r in selected)
+        packets = sum(fnum(r.get("sum_delta_packets")) for r in selected)
+        return packets / arrivals if arrivals else math.nan
+
+    def mean_jain(selected: list[dict[str, str]]) -> float:
+        vals = [fnum(r.get("jain_tx")) for r in selected]
+        vals = [v for v in vals if not math.isnan(v)]
+        return statistics.fmean(vals) if vals else math.nan
+
+    def queue_peak(selected: list[dict[str, str]]) -> float:
+        vals = [fnum(r.get("sum_queue")) for r in selected]
+        vals = [v for v in vals if not math.isnan(v)]
+        return max(vals) if vals else math.nan
+
+    pre_pdr = pdr(pre)
+    post_pdr = pdr(post)
+    return {
+        "pdr_pre100": pre_pdr,
+        "pdr_post100": post_pdr,
+        "pdr_drop_post100": pre_pdr - post_pdr
+        if not math.isnan(pre_pdr) and not math.isnan(post_pdr)
+        else math.nan,
+        "queue_peak_post100": queue_peak(post),
+        "jain_post100": mean_jain(post),
+        "jain_recovery100": mean_jain(recovery),
     }
 
 
@@ -340,6 +439,8 @@ def scenario_meta(scenario: str, run_dir: Path) -> dict[str, object]:
         "scenario": scenario,
         "num_nodes": perf.get("num_nodes", ""),
         "topology_mode": perf.get("topology_mode", ""),
+        "logical_topology_mode": perf.get("logical_topology_mode", ""),
+        "dynamic_topology_mode": perf.get("dynamic_topology_mode", "static"),
     }
     m = SCENARIO_RE.match(scenario)
     if m:
@@ -392,8 +493,11 @@ def summarize_run(scenario: str, group: str, seed: int, run_dir: Path) -> dict[s
     }
     row.update(scenario_meta(scenario, run_dir))
     row.update(last_ppo(run_dir / "python.log"))
+    topology_events = summarize_topology_events(metrics_dir / "topology_events.csv")
+    row.update(topology_events)
     row.update(summarize_frame_metrics(metrics_dir / "frame_metrics.csv"))
     row.update(summarize_fairness(metrics_dir / "fairness.csv"))
+    row.update(summarize_dynamic_windows(metrics_dir / "fairness.csv", topology_events))
     row.update(
         summarize_slot_stats(
             metrics_dir / "slot_stats.csv",

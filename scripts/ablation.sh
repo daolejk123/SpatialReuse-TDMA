@@ -49,6 +49,13 @@ ENABLE_ADAPTIVE_TRAFFIC=""
 RAMP_RATE_START=""
 RAMP_RATE_STEP=""
 RAMP_RATE_MAX=""
+DYNAMIC_TOPOLOGY_MODE=""
+LOGICAL_TOPOLOGY_MODE=""
+PERTURB_AT_FRAME=""
+RECOVERY_AT_FRAME=""
+DROPOUT_RATIO=""
+EDGE_TOGGLE_RATIO=""
+SWITCH_TOPOLOGY_MODE=""
 ROOT_LOG=""
 DRY_RUN=false
 
@@ -69,6 +76,13 @@ while [[ $# -gt 0 ]]; do
         --ramp_rate_start) RAMP_RATE_START="$2"; shift 2 ;;
         --ramp_rate_step) RAMP_RATE_STEP="$2"; shift 2 ;;
         --ramp_rate_max) RAMP_RATE_MAX="$2"; shift 2 ;;
+        --dynamic_topology_mode) DYNAMIC_TOPOLOGY_MODE="$2"; shift 2 ;;
+        --logical_topology_mode) LOGICAL_TOPOLOGY_MODE="$2"; shift 2 ;;
+        --perturb_at_frame) PERTURB_AT_FRAME="$2"; shift 2 ;;
+        --recovery_at_frame) RECOVERY_AT_FRAME="$2"; shift 2 ;;
+        --dropout_ratio) DROPOUT_RATIO="$2"; shift 2 ;;
+        --edge_toggle_ratio) EDGE_TOGGLE_RATIO="$2"; shift 2 ;;
+        --switch_topology_mode) SWITCH_TOPOLOGY_MODE="$2"; shift 2 ;;
         --metrics_mode) METRICS_MODE="$2"; shift 2 ;;
         --save_every) SAVE_EVERY="$2"; shift 2 ;;
         --target_updates) TARGET_UPDATES="$2"; shift 2 ;;
@@ -139,6 +153,8 @@ info "num_nodes = ${NUM_NODES}, num_slots = ${NUM_SLOTS}"
 [ -n "$TRAFFIC_RATE" ] && info "traffic_rate = ${TRAFFIC_RATE}"
 [ -n "$ENABLE_RAMP_TRAFFIC" ] && info "enable_ramp_traffic = ${ENABLE_RAMP_TRAFFIC}"
 [ -n "$ENABLE_ADAPTIVE_TRAFFIC" ] && info "enable_adaptive_traffic = ${ENABLE_ADAPTIVE_TRAFFIC}"
+[ -n "$DYNAMIC_TOPOLOGY_MODE" ] && info "dynamic_topology_mode = ${DYNAMIC_TOPOLOGY_MODE}"
+[ -n "$LOGICAL_TOPOLOGY_MODE" ] && info "logical_topology_mode = ${LOGICAL_TOPOLOGY_MODE}"
 info "启用 B 时的 heur_deviation_coef = ${HEUR_COEF}"
 [ -n "$IDLE_QUEUE_PENALTY" ] && info "idle_queue_penalty = ${IDLE_QUEUE_PENALTY}"
 info "metrics_mode = ${METRICS_MODE}"
@@ -183,6 +199,8 @@ run_one() {
         [ -n "$TRAFFIC_RATE" ] && info "                   --traffic_rate $TRAFFIC_RATE \\"
         [ -n "$ENABLE_RAMP_TRAFFIC" ] && info "                   --enable_ramp_traffic $ENABLE_RAMP_TRAFFIC \\"
         [ -n "$ENABLE_ADAPTIVE_TRAFFIC" ] && info "                   --enable_adaptive_traffic $ENABLE_ADAPTIVE_TRAFFIC \\"
+        [ -n "$DYNAMIC_TOPOLOGY_MODE" ] && info "                   --dynamic_topology_mode $DYNAMIC_TOPOLOGY_MODE \\"
+        [ -n "$LOGICAL_TOPOLOGY_MODE" ] && info "                   --logical_topology_mode $LOGICAL_TOPOLOGY_MODE \\"
         info "                   --heur_deviation_coef $HDEV --metrics_mode $METRICS_MODE \\"
         [ -n "$IDLE_QUEUE_PENALTY" ] && info "                   --idle_queue_penalty $IDLE_QUEUE_PENALTY \\"
         [ -n "$SAVE_EVERY" ] && info "                   --save_every $SAVE_EVERY \\"
@@ -216,6 +234,14 @@ run_one() {
     [ -n "$RAMP_RATE_START" ] && TRAFFIC_ARGS+=(--ramp_rate_start "$RAMP_RATE_START")
     [ -n "$RAMP_RATE_STEP" ] && TRAFFIC_ARGS+=(--ramp_rate_step "$RAMP_RATE_STEP")
     [ -n "$RAMP_RATE_MAX" ] && TRAFFIC_ARGS+=(--ramp_rate_max "$RAMP_RATE_MAX")
+    local DYNAMIC_ARGS=()
+    [ -n "$DYNAMIC_TOPOLOGY_MODE" ] && DYNAMIC_ARGS+=(--dynamic_topology_mode "$DYNAMIC_TOPOLOGY_MODE")
+    [ -n "$LOGICAL_TOPOLOGY_MODE" ] && DYNAMIC_ARGS+=(--logical_topology_mode "$LOGICAL_TOPOLOGY_MODE")
+    [ -n "$PERTURB_AT_FRAME" ] && DYNAMIC_ARGS+=(--perturb_at_frame "$PERTURB_AT_FRAME")
+    [ -n "$RECOVERY_AT_FRAME" ] && DYNAMIC_ARGS+=(--recovery_at_frame "$RECOVERY_AT_FRAME")
+    [ -n "$DROPOUT_RATIO" ] && DYNAMIC_ARGS+=(--dropout_ratio "$DROPOUT_RATIO")
+    [ -n "$EDGE_TOGGLE_RATIO" ] && DYNAMIC_ARGS+=(--edge_toggle_ratio "$EDGE_TOGGLE_RATIO")
+    [ -n "$SWITCH_TOPOLOGY_MODE" ] && DYNAMIC_ARGS+=(--switch_topology_mode "$SWITCH_TOPOLOGY_MODE")
     local PIPE_SUFFIX
     PIPE_SUFFIX="$(printf '%s_seed%s_%s' "$group" "$seed" "$$" | tr -c 'A-Za-z0-9_' '_')"
     local STATE_PIPE="/tmp/tdma_rl_state_${PIPE_SUFFIX}"
@@ -234,6 +260,7 @@ run_one() {
         --record_eventlog false \
         "${TOPOLOGY_ARGS[@]}" \
         "${TRAFFIC_ARGS[@]}" \
+        "${DYNAMIC_ARGS[@]}" \
         --heur_deviation_coef "$HDEV" \
         "${IDLE_ARGS[@]}" \
         "${SAVE_ARGS[@]}" \
@@ -262,6 +289,8 @@ run_one() {
         [ -n "$TOPOLOGY_MODE" ] && echo "topology_mode=$TOPOLOGY_MODE"
         [ -n "$GRID_COLS" ] && echo "grid_cols=$GRID_COLS"
         [ -n "$TRAFFIC_RATE" ] && echo "traffic_rate=$TRAFFIC_RATE"
+        [ -n "$DYNAMIC_TOPOLOGY_MODE" ] && echo "dynamic_topology_mode=$DYNAMIC_TOPOLOGY_MODE"
+        [ -n "$LOGICAL_TOPOLOGY_MODE" ] && echo "logical_topology_mode=$LOGICAL_TOPOLOGY_MODE"
         echo "state_pipe=$STATE_PIPE"
         echo "action_pipe=$ACTION_PIPE"
         [ -f "$LOG_DIR/python.log" ] && grep -E '^\[PPO\]' "$LOG_DIR/python.log" | tail -1 | sed 's/^/last_ppo=/'

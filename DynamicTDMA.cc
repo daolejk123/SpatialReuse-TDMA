@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <system_error>
 #include <cctype>
+#include <cmath>
+#include <utility>
 
 Define_Module(DynamicTDMA);
 
@@ -22,6 +24,14 @@ std::string DynamicTDMA::sRlActionPipePath = "/tmp/tdma_rl_action";
 long long DynamicTDMA::sRlActionReconnectCounter = 0;
 std::map<int, std::vector<double>> DynamicTDMA::sRlActionMap;
 long long DynamicTDMA::sRlActionFrame = -1;
+bool DynamicTDMA::sTopologyInitialized = false;
+bool DynamicTDMA::sTopologyPerturbed = false;
+bool DynamicTDMA::sTopologyRecovered = false;
+int DynamicTDMA::sTopologyNumNodes = 0;
+std::vector<bool> DynamicTDMA::sActiveNodes;
+std::vector<std::vector<bool>> DynamicTDMA::sBaseEdges;
+std::vector<std::vector<bool>> DynamicTDMA::sActiveEdges;
+std::vector<std::vector<bool>> DynamicTDMA::sScenarioEdges;
 
 static std::string buildTimestampedStatsPath(const std::string &prefix,
                                              bool useResultsDir) {
@@ -102,6 +112,7 @@ static inline bool containsId(const std::vector<int> &v, int id);
 static inline void addUniqueId(std::vector<int> &v, int id);
 static inline void removeId(std::vector<int> &v, int id);
 static inline int occupancyLegacyValue(const std::vector<int> &v);
+static double deterministicUnit(int a, int b, int seed);
 
 void DynamicTDMA::initialize() {
   myId = par("myId");
@@ -189,6 +200,50 @@ void DynamicTDMA::initialize() {
        << ", fallback to dynamic_tdma" << endl;
     macMode = "dynamic_tdma";
   }
+  if (hasPar("dynamicTopologyMode")) {
+    dynamicTopologyMode =
+        lowerAscii(par("dynamicTopologyMode").stdstringValue());
+  }
+  if (dynamicTopologyMode != "static" &&
+      dynamicTopologyMode != "edge_toggle" &&
+      dynamicTopologyMode != "topology_switch" &&
+      dynamicTopologyMode != "node_dropout" &&
+      dynamicTopologyMode != "node_rejoin") {
+    EV << "Unknown dynamicTopologyMode=" << dynamicTopologyMode
+       << ", fallback to static" << endl;
+    dynamicTopologyMode = "static";
+  }
+  if (hasPar("switchTopologyMode")) {
+    switchTopologyMode = lowerAscii(par("switchTopologyMode").stdstringValue());
+  }
+  if (hasPar("logicalTopologyMode")) {
+    logicalTopologyMode = lowerAscii(par("logicalTopologyMode").stdstringValue());
+  }
+  if (hasPar("perturbAtFrame")) {
+    perturbAtFrame = par("perturbAtFrame");
+  }
+  if (hasPar("recoveryAtFrame")) {
+    recoveryAtFrame = par("recoveryAtFrame");
+  }
+  if (hasPar("dropoutRatio")) {
+    dropoutRatio = par("dropoutRatio").doubleValue();
+  }
+  if (hasPar("edgeToggleRatio")) {
+    edgeToggleRatio = par("edgeToggleRatio").doubleValue();
+  }
+  if (hasPar("dynamicTopologySeed")) {
+    dynamicTopologySeed = par("dynamicTopologySeed");
+  }
+  if (perturbAtFrame < 0)
+    perturbAtFrame = 0;
+  if (dropoutRatio < 0.0)
+    dropoutRatio = 0.0;
+  if (dropoutRatio > 1.0)
+    dropoutRatio = 1.0;
+  if (edgeToggleRatio < 0.0)
+    edgeToggleRatio = 0.0;
+  if (edgeToggleRatio > 1.0)
+    edgeToggleRatio = 1.0;
   lastGeneratedThisFrame = 0;
   prevQueueSize = 0;
 
@@ -201,10 +256,11 @@ void DynamicTDMA::initialize() {
   static std::string gStatsCsvPath;
   static std::string gFrameMetricsPath;
   static std::string gFairnessPath;
+  static std::string gTopologyEventsPath;
   static std::string gFeatureBaseDir;
   if (metricsEnabled &&
       (gStatsCsvPath.empty() || gFrameMetricsPath.empty() ||
-       gFairnessPath.empty() ||
+       gFairnessPath.empty() || gTopologyEventsPath.empty() ||
        (featureTraceEnabled && gFeatureBaseDir.empty()))) {
     std::string metricsDir =
         hasPar("metricsOutputDir") ? par("metricsOutputDir").stdstringValue()
@@ -216,6 +272,7 @@ void DynamicTDMA::initialize() {
         gStatsCsvPath = joinPath(metricsDir, "slot_stats.csv");
         gFrameMetricsPath = joinPath(metricsDir, "frame_metrics.csv");
         gFairnessPath = joinPath(metricsDir, "fairness.csv");
+        gTopologyEventsPath = joinPath(metricsDir, "topology_events.csv");
         if (featureTraceEnabled) {
           gFeatureBaseDir = joinPath(metricsDir, "node_features");
           std::filesystem::create_directories(gFeatureBaseDir, ec);
@@ -229,12 +286,13 @@ void DynamicTDMA::initialize() {
         gStatsCsvPath.clear();
         gFrameMetricsPath.clear();
         gFairnessPath.clear();
+        gTopologyEventsPath.clear();
         gFeatureBaseDir.clear();
       }
     }
 
     if (gStatsCsvPath.empty() || gFrameMetricsPath.empty() ||
-        gFairnessPath.empty() ||
+        gFairnessPath.empty() || gTopologyEventsPath.empty() ||
         (featureTraceEnabled && gFeatureBaseDir.empty())) {
       // 优先写到 results/ 目录；失败时回退到当前目录
       std::string primary = buildTimestampedStatsPath("slot_stats_", true);
@@ -262,6 +320,16 @@ void DynamicTDMA::initialize() {
       } else {
         gFairnessPath = buildTimestampedStatsPath("fairness_", false);
       }
+      std::string topoPrimary =
+          buildTimestampedStatsPath("topology_events_", true);
+      std::ofstream topoTest(topoPrimary, std::ios::app);
+      if (topoTest.is_open()) {
+        gTopologyEventsPath = topoPrimary;
+        topoTest.close();
+      } else {
+        gTopologyEventsPath =
+            buildTimestampedStatsPath("topology_events_", false);
+      }
       if (featureTraceEnabled) {
         std::string featurePrimary = buildTimestampedDir("node_features_", true);
         gFeatureBaseDir = featurePrimary;
@@ -280,6 +348,7 @@ void DynamicTDMA::initialize() {
     statsCsvPath = gStatsCsvPath;
     frameMetricsCsvPath = gFrameMetricsPath;
     fairnessCsvPath = gFairnessPath;
+    topologyEventsCsvPath = gTopologyEventsPath;
   }
   if (metricsEnabled && featureTraceEnabled && !gFeatureBaseDir.empty()) {
     std::string nodeDir =
@@ -332,6 +401,7 @@ void DynamicTDMA::initialize() {
   myHeurProbs.assign(numDataSlots, 0.0);
   frameSuccessfulSlots.assign(numDataSlots, false);
   nodeOccHistory.assign(numNodes, std::deque<int>{});
+  initializeLogicalTopology();
 
   // 初始进入 Request Phase
   currentState = STATE_REQUEST_PHASE;
@@ -545,7 +615,230 @@ static inline int occupancyLegacyValue(const std::vector<int> &v) {
   return -3;
 }
 
+static double deterministicUnit(int a, int b, int seed) {
+  unsigned int x = (unsigned int)(a + 1) * 1103515245u;
+  x ^= (unsigned int)(b + 17) * 2654435761u;
+  x ^= (unsigned int)(seed + 1013904223);
+  x ^= x >> 16;
+  x *= 2246822519u;
+  x ^= x >> 13;
+  return (double)(x % 1000000u) / 1000000.0;
+}
+
+void DynamicTDMA::initializeLogicalTopology() {
+  if (sTopologyInitialized && sTopologyNumNodes == numNodes)
+    return;
+  sTopologyNumNodes = numNodes;
+  sTopologyInitialized = true;
+  sTopologyPerturbed = false;
+  sTopologyRecovered = false;
+  sActiveNodes.assign(numNodes, true);
+  sBaseEdges = logicalTopologyMode.empty() ? buildGateEdges()
+                                           : buildTopologyEdges(logicalTopologyMode);
+  sActiveEdges = sBaseEdges;
+  sScenarioEdges = buildTopologyEdges(switchTopologyMode);
+}
+
+std::vector<std::vector<bool>>
+DynamicTDMA::buildGateEdges() const {
+  std::vector<std::vector<bool>> edges(
+      numNodes, std::vector<bool>(numNodes, false));
+  const cModule *parent = getParentModule();
+  if (!parent)
+    return edges;
+  for (int src = 0; src < numNodes; src++) {
+    const cModule *node = parent->getSubmodule("nodes", src);
+    if (!node)
+      continue;
+    int outGateCount = node->gateSize("radioOut");
+    for (int g = 0; g < outGateCount; g++) {
+      const cGate *outGate = node->gate("radioOut", g);
+      if (!outGate || !outGate->isConnected())
+        continue;
+      const cGate *next = outGate->getNextGate();
+      if (!next)
+        continue;
+      const cModule *neighbor = next->getOwnerModule();
+      if (neighbor && neighbor->hasPar("myId")) {
+        int dst = neighbor->par("myId").intValue();
+        if (dst >= 0 && dst < numNodes && dst != src) {
+          edges[src][dst] = true;
+        }
+      }
+    }
+  }
+  return edges;
+}
+
+std::vector<std::vector<bool>>
+DynamicTDMA::buildTopologyEdges(const std::string &mode) const {
+  std::vector<std::vector<bool>> edges(
+      numNodes, std::vector<bool>(numNodes, false));
+  int gridCols = 3;
+  const cModule *parent = getParentModule();
+  if (parent && parent->hasPar("gridCols")) {
+    gridCols = parent->par("gridCols");
+  }
+  if (gridCols <= 0)
+    gridCols = 1;
+
+  for (int i = 0; i < numNodes; i++) {
+    for (int j = 0; j < numNodes; j++) {
+      if (i == j)
+        continue;
+      bool connected = false;
+      if (mode == "full") {
+        connected = true;
+      } else if (mode == "line") {
+        connected = (j == i + 1 || j == i - 1);
+      } else if (mode == "ring") {
+        connected = (j == i + 1 || j == i - 1 ||
+                     (i == 0 && j == numNodes - 1) ||
+                     (i == numNodes - 1 && j == 0));
+      } else if (mode == "star") {
+        connected = ((i == 0 && j != 0) || (j == 0 && i != 0));
+      } else if (mode == "grid") {
+        connected = ((j == i + 1 && (i + 1) % gridCols != 0) ||
+                     (j == i - 1 && i % gridCols != 0) ||
+                     j == i + gridCols || j == i - gridCols);
+      } else if (mode == "clustered") {
+        connected =
+            (((i < numNodes / 2) && (j < numNodes / 2)) ||
+             ((i >= numNodes / 2) && (j >= numNodes / 2)) ||
+             (i == numNodes / 2 - 1 && j == numNodes / 2) ||
+             (i == numNodes / 2 && j == numNodes / 2 - 1));
+      }
+      edges[i][j] = connected;
+    }
+  }
+  return edges;
+}
+
+bool DynamicTDMA::isNodeActive(int nodeId) const {
+  if (nodeId < 0 || nodeId >= numNodes)
+    return false;
+  if ((int)sActiveNodes.size() != numNodes)
+    return true;
+  return sActiveNodes[nodeId];
+}
+
+bool DynamicTDMA::isActiveLink(int srcId, int dstId) const {
+  if (srcId < 0 || srcId >= numNodes || dstId < 0 || dstId >= numNodes)
+    return false;
+  if (!isNodeActive(srcId) || !isNodeActive(dstId))
+    return false;
+  if ((int)sActiveEdges.size() != numNodes ||
+      (int)sActiveEdges[srcId].size() != numNodes)
+    return true;
+  return sActiveEdges[srcId][dstId];
+}
+
+int DynamicTDMA::activeNodeCount() const {
+  int count = 0;
+  for (bool active : sActiveNodes) {
+    if (active)
+      count++;
+  }
+  return count;
+}
+
+int DynamicTDMA::activeEdgeCount() const {
+  int count = 0;
+  for (const auto &row : sActiveEdges) {
+    for (bool active : row) {
+      if (active)
+        count++;
+    }
+  }
+  return count;
+}
+
+void DynamicTDMA::logTopologyEvent(const std::string &event,
+                                   const std::string &message) {
+  if (myId != 0 || !metricsEnabled || topologyEventsCsvPath.empty())
+    return;
+  std::ofstream ofs(topologyEventsCsvPath, std::ios::app);
+  if (!ofs.is_open())
+    return;
+  bool needHeader = false;
+  {
+    std::ifstream ifs(topologyEventsCsvPath.c_str());
+    needHeader = (!ifs.is_open()) ||
+                 (ifs.peek() == std::ifstream::traits_type::eof());
+  }
+  if (needHeader) {
+    ofs << "simTime,frame,event,mode,active_nodes,active_edges,message\n";
+  }
+  ofs << simTime() << "," << frameCounter << "," << event << ","
+      << dynamicTopologyMode << "," << activeNodeCount() << ","
+      << activeEdgeCount() << ",\"" << escapeJsonString(message) << "\"\n";
+}
+
+void DynamicTDMA::applyEdgeToggle() {
+  sActiveEdges = sBaseEdges;
+  for (int i = 0; i < numNodes; i++) {
+    for (int j = 0; j < numNodes; j++) {
+      if (!sBaseEdges[i][j])
+        continue;
+      if (deterministicUnit(i, j, dynamicTopologySeed) < edgeToggleRatio) {
+        sActiveEdges[i][j] = false;
+      }
+    }
+  }
+}
+
+void DynamicTDMA::applyNodeDropout(bool rejoinMode) {
+  (void)rejoinMode;
+  sActiveNodes.assign(numNodes, true);
+  int candidates = std::max(0, numNodes - 1); // 默认不关闭 node 0
+  int dropCount = (int)std::round((double)candidates * dropoutRatio);
+  dropCount = std::max(1, std::min(dropCount, candidates));
+  std::vector<std::pair<double, int>> scored;
+  for (int node = 1; node < numNodes; node++) {
+    scored.push_back({deterministicUnit(node, 0, dynamicTopologySeed), node});
+  }
+  std::sort(scored.begin(), scored.end());
+  for (int i = 0; i < dropCount && i < (int)scored.size(); i++) {
+    sActiveNodes[scored[i].second] = false;
+  }
+  sActiveEdges = sBaseEdges;
+}
+
+void DynamicTDMA::applyDynamicTopologyForFrame(long long frame) {
+  if (myId != 0 || dynamicTopologyMode == "static")
+    return;
+  if (!sTopologyPerturbed && frame >= perturbAtFrame) {
+    sTopologyPerturbed = true;
+    sTopologyRecovered = false;
+    if (dynamicTopologyMode == "topology_switch") {
+      sActiveEdges = sScenarioEdges;
+      sActiveNodes.assign(numNodes, true);
+      logTopologyEvent("perturb",
+                       "switch topology to " + switchTopologyMode);
+    } else if (dynamicTopologyMode == "edge_toggle") {
+      applyEdgeToggle();
+      sActiveNodes.assign(numNodes, true);
+      logTopologyEvent("perturb", "toggle logical edges");
+    } else if (dynamicTopologyMode == "node_dropout" ||
+               dynamicTopologyMode == "node_rejoin") {
+      applyNodeDropout(dynamicTopologyMode == "node_rejoin");
+      logTopologyEvent("perturb", "deactivate selected nodes");
+    }
+  }
+
+  if (sTopologyPerturbed && !sTopologyRecovered &&
+      recoveryAtFrame > perturbAtFrame && frame >= recoveryAtFrame &&
+      dynamicTopologyMode != "node_dropout") {
+    sTopologyRecovered = true;
+    sActiveNodes.assign(numNodes, true);
+    sActiveEdges = sBaseEdges;
+    logTopologyEvent("recover", "restore base logical topology");
+  }
+}
+
 int DynamicTDMA::findOutGateIndexToNode(int destNodeId) const {
+  if (!isActiveLink(myId, destNodeId))
+    return -1;
   int outGateCount = gateSize("radioOut");
   for (int i = 0; i < outGateCount; i++) {
     const cGate *outg = gate("radioOut", i);
@@ -734,9 +1027,14 @@ void DynamicTDMA::processSlotTimer() {
     // 申请子帧：共 numNodes 个时隙 (1~N)
     // 假设每个节点固定分配一个申请时隙 (ID = SlotIndex)
     if (currentSlotIndex == 0) { // 在 Request Phase 的第一个时隙生成流量
-      generateTraffic();
+      applyDynamicTopologyForFrame(frameCounter);
+      if (isNodeActive(myId)) {
+        generateTraffic();
+      } else {
+        lastGeneratedThisFrame = 0;
+      }
     }
-    if (currentSlotIndex == myId) {
+    if (currentSlotIndex == myId && isNodeActive(myId)) {
       // 尝试从 RL 动作管道读取最新动作（非阻塞，所有节点共享）
       readRlActions();
       // 在申请阶段开始前，先生成这一帧可能的业务 (确保队列有数据)
@@ -747,13 +1045,13 @@ void DynamicTDMA::processSlotTimer() {
 
   else if (currentState == STATE_REPLY_PHASE) {
     // 回复子帧：共 numNodes 个时隙
-    if (currentSlotIndex == myId) {
+    if (currentSlotIndex == myId && isNodeActive(myId)) {
       sendCTS();
     }
   } else if (currentState == STATE_DATA_PHASE) {
     // 业务子帧：共 numDataSlots 个时隙
     // 检查我是否赢得了当前业务时隙
-    if (currentSlotIndex < numDataSlots) {
+    if (currentSlotIndex < numDataSlots && isNodeActive(myId)) {
       if (mySlots[currentSlotIndex]) {
         sendData(currentSlotIndex);
       }
@@ -1129,7 +1427,14 @@ void DynamicTDMA::processSlotTimer() {
           if (needHeader) {
             fofs << "simTime,frame,nodeId,Bown,T2hop,Cctrl,mu_nbr,Qt,lambda_ewma,"
                   "Wt,Sharet,Share_avgnbr,Jlocal,Envy,req_candidates,req_sent,"
-                  "req_rate_observed,req_prob_avg\n";
+                  "req_rate_observed,req_prob_avg,active_nodes,active_edges,"
+                  "dynamic_mode,event_phase\n";
+          }
+          std::string eventPhase = "static";
+          if (dynamicTopologyMode != "static") {
+            eventPhase = !sTopologyPerturbed
+                             ? "pre"
+                             : (sTopologyRecovered ? "recovery" : "perturb");
           }
           fofs << simTime() << "," << frameCounter << "," << myId << ","
                << "\"" << bownBitmap << "\","
@@ -1138,6 +1443,8 @@ void DynamicTDMA::processSlotTimer() {
                << lambdaEwma << "," << Wt << "," << Sharet << "," << ShareAvgNbr
                << "," << Jlocal << "," << Envy << "," << reqCandidateCount << ","
                << reqSentCount << "," << reqRateObserved << "," << reqProbAvg
+               << "," << activeNodeCount() << "," << activeEdgeCount()
+               << "," << dynamicTopologyMode << "," << eventPhase
                << "\n";
           fofs.close();
         } else {
@@ -1240,6 +1547,10 @@ void DynamicTDMA::enterDataPhase() {
 // ------------------------------------------------------------------
 
 void DynamicTDMA::generateTraffic() {
+  if (!isNodeActive(myId)) {
+    lastGeneratedThisFrame = 0;
+    return;
+  }
   // 模拟从上一帧到现在这段时间内的包到达
 
   // 计算期望到达数 lambda * frameDuration
@@ -1283,17 +1594,7 @@ void DynamicTDMA::generateTraffic() {
     }
 
     // 随机目标 (排除自己)
-    std::vector<int> neighbors;
-    int outGateCount = gateSize("radioOut");
-    for (int g = 0; g < outGateCount; g++) {
-      cGate *outGate = gate("radioOut", g);
-      if (outGate->isConnected()) {
-        cModule *neighbor = outGate->getNextGate()->getOwnerModule();
-        if (neighbor && neighbor->hasPar("myId")) {
-          neighbors.push_back(neighbor->par("myId").intValue());
-        }
-      }
-    }
+    std::vector<int> neighbors = getOneHopNeighborIds();
 
     if (!neighbors.empty()) {
       pkt.destId = neighbors[intuniform(0, neighbors.size() - 1)];
@@ -1306,6 +1607,8 @@ void DynamicTDMA::generateTraffic() {
 }
 
 void DynamicTDMA::scheduleRequests() {
+  if (!isNodeActive(myId))
+    return;
   // 智能调度算法：优先为高优先级包申请
   myDesiredTargets.assign(numDataSlots, -1);
   myPriorities.assign(numDataSlots, 0.0);
@@ -1496,13 +1799,16 @@ void DynamicTDMA::sendRTS() {
 }
 
 void DynamicTDMA::handleRTS(TDMAGrantRequest *pkt) {
+  int senderId = pkt->getSrcId();
+  if (!isNodeActive(myId) || !isActiveLink(senderId, myId)) {
+    delete pkt;
+    return;
+  }
   if (currentState != STATE_REQUEST_PHASE &&
       currentState != STATE_REPLY_PHASE) {
     delete pkt;
     return;
   }
-
-  int senderId = pkt->getSrcId();
 
   NeighborInfo info;
   info.id = senderId;
@@ -1544,6 +1850,8 @@ void DynamicTDMA::handleRTS(TDMAGrantRequest *pkt) {
 }
 
 void DynamicTDMA::sendCTS() {
+  if (!isNodeActive(myId))
+    return;
   TDMAGrantReply *cts = new TDMAGrantReply("CTS");
   cts->setSrcId(myId);
 
@@ -1687,6 +1995,10 @@ bool DynamicTDMA::isVulnerableReceiver(int slotIdx) {
 
 void DynamicTDMA::handleCTS(TDMAGrantReply *pkt) {
   int senderId = pkt->getSrcId();
+  if (!isNodeActive(myId) || !isActiveLink(senderId, myId)) {
+    delete pkt;
+    return;
+  }
 
   // --- 适配动态数组API ---
   size_t size = pkt->getSlotGrantDecisionsArraySize();
@@ -1748,7 +2060,15 @@ void DynamicTDMA::handleCTS(TDMAGrantReply *pkt) {
 }
 
 void DynamicTDMA::sendData(int slotIdx) {
+  if (!isNodeActive(myId))
+    return;
   int target = myDesiredTargets[slotIdx];
+  if (!isActiveLink(myId, target)) {
+    mySlots[slotIdx] = false;
+    finalSlotWinners[slotIdx] = -1;
+    removeId(occupancyTable[slotIdx], myId);
+    return;
+  }
   TDMADataPacket *pkt = new TDMADataPacket("DATA");
   pkt->setSrcId(myId);
   // 从队列中查找并移除对应的数据包
@@ -1803,6 +2123,10 @@ void DynamicTDMA::sendData(int slotIdx) {
 }
 
 void DynamicTDMA::handleData(TDMADataPacket *pkt) {
+  if (!isNodeActive(myId) || !isActiveLink(pkt->getSrcId(), myId)) {
+    delete pkt;
+    return;
+  }
   if (pkt->getDestId() == myId) {
     EV << "RECEIVED DATA from " << pkt->getSrcId() << endl;
   }
@@ -1840,7 +2164,8 @@ std::vector<int> DynamicTDMA::getOneHopNeighborIds() const {
     const cModule *neighbor = next->getOwnerModule();
     if (neighbor && neighbor->hasPar("myId")) {
       int id = neighbor->par("myId").intValue();
-      addUniqueId(neighbors, id);
+      if (isActiveLink(myId, id))
+        addUniqueId(neighbors, id);
     }
   }
   return neighbors;
@@ -1865,13 +2190,18 @@ std::vector<int> DynamicTDMA::getOneHopNeighborIdsForNode(int nodeId) const {
     const cModule *neighbor = next->getOwnerModule();
     if (neighbor && neighbor->hasPar("myId")) {
       int id = neighbor->par("myId").intValue();
-      addUniqueId(neighbors, id);
+      if (isActiveLink(nodeId, id))
+        addUniqueId(neighbors, id);
     }
   }
   return neighbors;
 }
 
 void DynamicTDMA::broadcastPacket(cPacket *pkt) {
+  if (!isNodeActive(myId)) {
+    delete pkt;
+    return;
+  }
   if (isTransmitting) {
     EV << "Warning: Attempting to transmit while already transmitting. "
           "Dropping new packet."
@@ -1886,6 +2216,15 @@ void DynamicTDMA::broadcastPacket(cPacket *pkt) {
 
   int outGateCount = gateSize("radioOut");
   for (int i = 0; i < outGateCount; i++) {
+    const cGate *outGate = gate("radioOut", i);
+    const cGate *next = outGate ? outGate->getNextGate() : nullptr;
+    const cModule *neighbor = next ? next->getOwnerModule() : nullptr;
+    int dstId = -1;
+    if (neighbor && neighbor->hasPar("myId")) {
+      dstId = neighbor->par("myId").intValue();
+    }
+    if (!isActiveLink(myId, dstId))
+      continue;
     cPacket *copy = pkt->dup();
     send(copy, "radioOut", i);
   }

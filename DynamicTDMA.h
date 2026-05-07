@@ -171,10 +171,29 @@ protected:
   std::string statsCsvPath;
   std::string frameMetricsCsvPath;
   std::string fairnessCsvPath;
+  std::string topologyEventsCsvPath;
   std::string featureJsonlPath;
   bool metricsEnabled = true;
   bool featureTraceEnabled = true;
   std::string macMode = "dynamic_tdma";
+
+  // 动态拓扑：逻辑层 active node/edge 过滤，不重连 NED gate
+  std::string dynamicTopologyMode = "static";
+  std::string logicalTopologyMode = "";
+  std::string switchTopologyMode = "grid";
+  int perturbAtFrame = 1000;
+  int recoveryAtFrame = 1500;
+  double dropoutRatio = 0.25;
+  double edgeToggleRatio = 0.2;
+  int dynamicTopologySeed = 1;
+  static bool sTopologyInitialized;
+  static bool sTopologyPerturbed;
+  static bool sTopologyRecovered;
+  static int sTopologyNumNodes;
+  static std::vector<bool> sActiveNodes;
+  static std::vector<std::vector<bool>> sBaseEdges;
+  static std::vector<std::vector<bool>> sActiveEdges;
+  static std::vector<std::vector<bool>> sScenarioEdges;
 
   // RL 同步参数（从 omnetpp.ini 读取）
   // rlSyncInterval = 0：异步（不等待，原有行为）
@@ -244,6 +263,17 @@ protected:
   void runDeepLearningModel(); // (Deprecated)
   void updateOccupancyTable();
   void broadcastPacket(cPacket *pkt);
+  void initializeLogicalTopology();
+  std::vector<std::vector<bool>> buildTopologyEdges(const std::string &mode) const;
+  std::vector<std::vector<bool>> buildGateEdges() const;
+  void applyDynamicTopologyForFrame(long long frame);
+  void applyNodeDropout(bool rejoinMode);
+  void applyEdgeToggle();
+  void logTopologyEvent(const std::string &event, const std::string &message);
+  bool isNodeActive(int nodeId) const;
+  bool isActiveLink(int srcId, int dstId) const;
+  int activeNodeCount() const;
+  int activeEdgeCount() const;
 
   // RL 管道辅助：初始化管道（仅执行一次）；写一帧特征 JSON
   struct RlFrameFeatures {

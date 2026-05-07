@@ -40,6 +40,16 @@ simple DynamicTDMA
         // plain_tdma = 固定 owner slot 的传统 TDMA 基线。
         string macMode = default("dynamic_tdma");
 
+        // 动态拓扑扰动：只在协议层过滤逻辑链路，不运行时重连 NED gate。
+        string dynamicTopologyMode = default("static"); // static|edge_toggle|topology_switch|node_dropout|node_rejoin
+        string logicalTopologyMode = default("");       // 为空时使用 NED 物理连接作为逻辑基准
+        int perturbAtFrame = default(1000);
+        int recoveryAtFrame = default(1500);
+        double dropoutRatio = default(0.25);
+        double edgeToggleRatio = default(0.2);
+        string switchTopologyMode = default("grid");
+        int dynamicTopologySeed = default(1);
+
         // 方向 D：邻居密度自适应 clamp 乘数
         // false = 所有节点使用固定乘数上限 2.0（原行为）
         // true  = mult_max = 2.0 / (1.0 + 0.2 * numOneHopNeighbors)，邻居多的节点压缩探索空间

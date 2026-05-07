@@ -32,6 +32,11 @@ SAVE_EVERY="5000"
 TARGET_UPDATES=""
 TARGET_FRAMES=""
 STALE_TIMEOUT="300"
+PERTURB_AT_FRAME=""
+RECOVERY_AT_FRAME=""
+EDGE_TOGGLE_RATIO=""
+DROPOUT_RATIO=""
+SWITCH_TOPOLOGY_MODE=""
 JOBS=1
 ROOT_LOG=""
 METHODS_FILE="$PROJECT_DIR/configs/benchmark_methods.tsv"
@@ -52,6 +57,11 @@ while [[ $# -gt 0 ]]; do
         --target_updates) TARGET_UPDATES="$2"; shift 2 ;;
         --target_frames) TARGET_FRAMES="$2"; shift 2 ;;
         --stale_timeout) STALE_TIMEOUT="$2"; shift 2 ;;
+        --perturb_at_frame) PERTURB_AT_FRAME="$2"; shift 2 ;;
+        --recovery_at_frame) RECOVERY_AT_FRAME="$2"; shift 2 ;;
+        --edge_toggle_ratio) EDGE_TOGGLE_RATIO="$2"; shift 2 ;;
+        --dropout_ratio) DROPOUT_RATIO="$2"; shift 2 ;;
+        --switch_topology_mode) SWITCH_TOPOLOGY_MODE="$2"; shift 2 ;;
         --jobs) JOBS="$2"; shift 2 ;;
         --root_log) ROOT_LOG="$2"; shift 2 ;;
         --methods_file) METHODS_FILE="$2"; shift 2 ;;
@@ -90,7 +100,9 @@ grid_cols_for() {
 parse_scenario() {
     local scenario="$1"
     SCENARIO_LOAD_ARGS=()
+    SCENARIO_DYNAMIC_ARGS=()
     SCENARIO_DYNAMIC_MODE="static"
+    SCENARIO_PHYSICAL_TOPOLOGY=""
     if [[ ! "$scenario" =~ ^N([0-9]+)_(line|ring|star|grid|clustered|full)(.*)$ ]]; then
         echo "[BENCH] 场景格式必须以 N<number>_<topology> 开头，当前: $scenario" >&2
         exit 1
@@ -106,14 +118,56 @@ parse_scenario() {
         _load_overload) SCENARIO_LOAD_ARGS=(--traffic_rate 20.0) ;;
         _ramp) SCENARIO_LOAD_ARGS=(--enable_ramp_traffic true) ;;
         _adaptive) SCENARIO_LOAD_ARGS=(--enable_adaptive_traffic true) ;;
-        _edge_toggle|_to_grid|_bridge_break|_node_dropout|_node_rejoin|_center_stress)
-            SCENARIO_DYNAMIC_MODE="${SCENARIO_SUFFIX#_}"
+        _edge_toggle)
+            SCENARIO_DYNAMIC_MODE="edge_toggle"
+            SCENARIO_PHYSICAL_TOPOLOGY="full"
+            SCENARIO_DYNAMIC_ARGS=(--dynamic_topology_mode edge_toggle --logical_topology_mode "$SCENARIO_TOPOLOGY")
+            ;;
+        _to_grid)
+            SCENARIO_DYNAMIC_MODE="topology_switch"
+            SCENARIO_PHYSICAL_TOPOLOGY="full"
+            SCENARIO_DYNAMIC_ARGS=(--dynamic_topology_mode topology_switch --logical_topology_mode "$SCENARIO_TOPOLOGY" --switch_topology_mode grid)
+            ;;
+        _bridge_break)
+            SCENARIO_DYNAMIC_MODE="edge_toggle"
+            SCENARIO_PHYSICAL_TOPOLOGY="full"
+            SCENARIO_DYNAMIC_ARGS=(--dynamic_topology_mode edge_toggle --logical_topology_mode "$SCENARIO_TOPOLOGY" --edge_toggle_ratio 0.3)
+            ;;
+        _node_dropout)
+            SCENARIO_DYNAMIC_MODE="node_dropout"
+            SCENARIO_PHYSICAL_TOPOLOGY="full"
+            SCENARIO_DYNAMIC_ARGS=(--dynamic_topology_mode node_dropout --logical_topology_mode "$SCENARIO_TOPOLOGY")
+            ;;
+        _node_rejoin)
+            SCENARIO_DYNAMIC_MODE="node_rejoin"
+            SCENARIO_PHYSICAL_TOPOLOGY="full"
+            SCENARIO_DYNAMIC_ARGS=(--dynamic_topology_mode node_rejoin --logical_topology_mode "$SCENARIO_TOPOLOGY")
+            ;;
+        _center_stress)
+            SCENARIO_DYNAMIC_MODE="edge_toggle"
+            SCENARIO_PHYSICAL_TOPOLOGY="full"
+            SCENARIO_DYNAMIC_ARGS=(--dynamic_topology_mode edge_toggle --logical_topology_mode "$SCENARIO_TOPOLOGY" --edge_toggle_ratio 0.4)
             ;;
         *)
-            echo "[BENCH] 不支持的场景后缀: $SCENARIO_SUFFIX（当前只支持 load/ramp/adaptive 和动态场景占位）" >&2
+            echo "[BENCH] 不支持的场景后缀: $SCENARIO_SUFFIX（当前支持 load/ramp/adaptive 与动态拓扑场景）" >&2
             exit 1
             ;;
     esac
+    if [ -n "$PERTURB_AT_FRAME" ]; then
+        SCENARIO_DYNAMIC_ARGS+=(--perturb_at_frame "$PERTURB_AT_FRAME")
+    fi
+    if [ -n "$RECOVERY_AT_FRAME" ]; then
+        SCENARIO_DYNAMIC_ARGS+=(--recovery_at_frame "$RECOVERY_AT_FRAME")
+    fi
+    if [ -n "$EDGE_TOGGLE_RATIO" ]; then
+        SCENARIO_DYNAMIC_ARGS+=(--edge_toggle_ratio "$EDGE_TOGGLE_RATIO")
+    fi
+    if [ -n "$DROPOUT_RATIO" ]; then
+        SCENARIO_DYNAMIC_ARGS+=(--dropout_ratio "$DROPOUT_RATIO")
+    fi
+    if [ -n "$SWITCH_TOPOLOGY_MODE" ]; then
+        SCENARIO_DYNAMIC_ARGS+=(--switch_topology_mode "$SWITCH_TOPOLOGY_MODE")
+    fi
 }
 
 lookup_method() {
@@ -149,6 +203,11 @@ printf 'scenario\tmethod\tseed\tlog_dir\timplementation\tnetwork\trunner\tmacMod
     printf 'target_updates\t%s\n' "$TARGET_UPDATES"
     printf 'target_frames\t%s\n' "$TARGET_FRAMES"
     printf 'stale_timeout\t%s\n' "$STALE_TIMEOUT"
+    printf 'perturb_at_frame\t%s\n' "$PERTURB_AT_FRAME"
+    printf 'recovery_at_frame\t%s\n' "$RECOVERY_AT_FRAME"
+    printf 'edge_toggle_ratio\t%s\n' "$EDGE_TOGGLE_RATIO"
+    printf 'dropout_ratio\t%s\n' "$DROPOUT_RATIO"
+    printf 'switch_topology_mode\t%s\n' "$SWITCH_TOPOLOGY_MODE"
     printf 'jobs\t%s\n' "$JOBS"
     printf 'methods_file\t%s\n' "$METHODS_FILE"
 } > "$SUITE_CONFIG"
@@ -159,6 +218,7 @@ info "suite=$SUITE scenarios=[$SCENARIOS] methods=[$METHODS] seeds=[$SEEDS]"
 for scenario in $SCENARIOS; do
     parse_scenario "$scenario"
     grid_cols="$(grid_cols_for "$SCENARIO_N")"
+    run_topology="${SCENARIO_PHYSICAL_TOPOLOGY:-$SCENARIO_TOPOLOGY}"
     scenario_dir="$ROOT_LOG/$scenario"
     mkdir -p "$scenario_dir"
 
@@ -183,12 +243,13 @@ for scenario in $SCENARIOS; do
                     --sim_time "$SIM_TIME"
                     --num_nodes "$SCENARIO_N"
                     --num_slots "$NUM_SLOTS"
-                    --topology_mode "$SCENARIO_TOPOLOGY"
+                    --topology_mode "$run_topology"
                     --grid_cols "$grid_cols"
                     --groups "$METHOD_GROUP"
                     --seeds "$SEEDS"
                     --heur_coef "$HEUR_COEF"
                     "${SCENARIO_LOAD_ARGS[@]}"
+                    "${SCENARIO_DYNAMIC_ARGS[@]}"
                     --metrics_mode "$METRICS_MODE"
                     --jobs "$JOBS"
                     --stale_timeout "$STALE_TIMEOUT"
@@ -233,7 +294,7 @@ for scenario in $SCENARIOS; do
                         --sim_time "$SIM_TIME"
                         --num_nodes "$SCENARIO_N"
                         --num_slots "$NUM_SLOTS"
-                        --topology_mode "$SCENARIO_TOPOLOGY"
+                        --topology_mode "$run_topology"
                         --grid_cols "$grid_cols"
                         --seed "$seed"
                         --group "$method"
@@ -241,6 +302,7 @@ for scenario in $SCENARIOS; do
                         --skip_ppo
                         --record_eventlog false
                         "${SCENARIO_LOAD_ARGS[@]}"
+                        "${SCENARIO_DYNAMIC_ARGS[@]}"
                         --metrics_mode "$METRICS_MODE"
                         --stale_timeout "$STALE_TIMEOUT"
                         --log_dir "$log_dir"
