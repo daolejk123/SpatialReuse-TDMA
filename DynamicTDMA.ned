@@ -59,6 +59,8 @@ simple DynamicTDMA
         string metricsOutputDir = default("");
         // full=完整 CSV+node_features，summary=仅 CSV，off=关闭磁盘指标输出。
         string metricsMode = default("full");
+        // CSV buffered writer 每写入 N 行 flush 一次；仿真结束时强制 flush/close。
+        int metricsFlushEvery = default(200);
 
         // RL 管道路径；批量并行实验时由脚本写入独立 FIFO，避免 run 间冲突。
         string rlStatePipePath = default("/tmp/tdma_rl_state");

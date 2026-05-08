@@ -6,6 +6,7 @@
 #include <sstream>
 #include <algorithm>
 #include <filesystem>
+#include <memory>
 #include <system_error>
 #include <cctype>
 #include <cmath>
@@ -32,6 +33,70 @@ std::vector<bool> DynamicTDMA::sActiveNodes;
 std::vector<std::vector<bool>> DynamicTDMA::sBaseEdges;
 std::vector<std::vector<bool>> DynamicTDMA::sActiveEdges;
 std::vector<std::vector<bool>> DynamicTDMA::sScenarioEdges;
+
+namespace {
+struct BufferedCsvWriter {
+  std::ofstream stream;
+  long long pendingRows = 0;
+  bool warned = false;
+};
+
+std::map<std::string, std::unique_ptr<BufferedCsvWriter>> gCsvWriters;
+
+bool isFileEmptyOrMissing(const std::string &path) {
+  std::ifstream ifs(path.c_str());
+  return (!ifs.is_open()) || (ifs.peek() == std::ifstream::traits_type::eof());
+}
+
+BufferedCsvWriter *getCsvWriter(const std::string &path,
+                                const std::string &header) {
+  if (path.empty())
+    return nullptr;
+  auto it = gCsvWriters.find(path);
+  if (it == gCsvWriters.end()) {
+    auto writer = std::make_unique<BufferedCsvWriter>();
+    bool needHeader = isFileEmptyOrMissing(path);
+    writer->stream.open(path, std::ios::app);
+    if (writer->stream.is_open() && needHeader) {
+      writer->stream << header << '\n';
+    }
+    it = gCsvWriters.emplace(path, std::move(writer)).first;
+  }
+  if (!it->second->stream.is_open()) {
+    if (!it->second->warned) {
+      EV << "WARNING: Cannot open CSV output file (" << path << ")." << endl;
+      it->second->warned = true;
+    }
+    return nullptr;
+  }
+  return it->second.get();
+}
+
+void writeBufferedCsvRow(const std::string &path, const std::string &header,
+                         const std::string &row, int flushEvery) {
+  BufferedCsvWriter *writer = getCsvWriter(path, header);
+  if (!writer)
+    return;
+  writer->stream << row << '\n';
+  writer->pendingRows++;
+  if (flushEvery <= 0)
+    flushEvery = 200;
+  if (writer->pendingRows >= flushEvery) {
+    writer->stream.flush();
+    writer->pendingRows = 0;
+  }
+}
+
+void flushAllCsvWriters() {
+  for (auto &[_, writer] : gCsvWriters) {
+    if (writer && writer->stream.is_open()) {
+      writer->stream.flush();
+      writer->stream.close();
+    }
+  }
+  gCsvWriters.clear();
+}
+} // namespace
 
 static std::string buildTimestampedStatsPath(const std::string &prefix,
                                              bool useResultsDir) {
@@ -253,6 +318,12 @@ void DynamicTDMA::initialize() {
                             : "full";
   metricsEnabled = (metricsMode != "off");
   featureTraceEnabled = (metricsMode == "full");
+  if (hasPar("metricsFlushEvery")) {
+    metricsFlushEvery = par("metricsFlushEvery");
+  }
+  if (metricsFlushEvery <= 0) {
+    metricsFlushEvery = 200;
+  }
   static std::string gStatsCsvPath;
   static std::string gFrameMetricsPath;
   static std::string gFairnessPath;
@@ -459,6 +530,10 @@ void DynamicTDMA::handleMessage(cMessage *msg) {
       delete pkt;
     }
   }
+}
+
+void DynamicTDMA::finish() {
+  flushAllCsvWriters();
 }
 
 void DynamicTDMA::finalizeDataPhaseAndUpdateDisplay() {
@@ -757,21 +832,14 @@ void DynamicTDMA::logTopologyEvent(const std::string &event,
                                    const std::string &message) {
   if (myId != 0 || !metricsEnabled || topologyEventsCsvPath.empty())
     return;
-  std::ofstream ofs(topologyEventsCsvPath, std::ios::app);
-  if (!ofs.is_open())
-    return;
-  bool needHeader = false;
-  {
-    std::ifstream ifs(topologyEventsCsvPath.c_str());
-    needHeader = (!ifs.is_open()) ||
-                 (ifs.peek() == std::ifstream::traits_type::eof());
-  }
-  if (needHeader) {
-    ofs << "simTime,frame,event,mode,active_nodes,active_edges,message\n";
-  }
-  ofs << simTime() << "," << frameCounter << "," << event << ","
+  std::ostringstream row;
+  row << simTime() << "," << frameCounter << "," << event << ","
       << dynamicTopologyMode << "," << activeNodeCount() << ","
-      << activeEdgeCount() << ",\"" << escapeJsonString(message) << "\"\n";
+      << activeEdgeCount() << ",\"" << escapeJsonString(message) << "\"";
+  writeBufferedCsvRow(
+      topologyEventsCsvPath,
+      "simTime,frame,event,mode,active_nodes,active_edges,message",
+      row.str(), metricsFlushEvery);
 }
 
 void DynamicTDMA::applyEdgeToggle() {
@@ -1118,27 +1186,15 @@ void DynamicTDMA::processSlotTimer() {
           if (metricsEnabled) {
             double jainTx = jain(agg.sumTx, agg.sumTxSq);
             const std::string &fairPath = fairnessCsvPath;
-            std::ofstream fofs(fairPath, std::ios::app);
-            if (fofs.is_open()) {
-              bool needHeader = false;
-              {
-                std::ifstream ifs(fairPath.c_str());
-                needHeader = (!ifs.is_open()) ||
-                             (ifs.peek() == std::ifstream::traits_type::eof());
-              }
-              if (needHeader) {
-                fofs << "frame,jain_tx,sum_delta_packets,sum_queue,sum_arrivals,"
-                        "sum_queue_delta,traffic_rate\n";
-              }
-              fofs << frameCounter << "," << jainTx << "," << agg.sumPkt << ","
-                   << agg.sumQueue << "," << agg.sumArrivals << ","
-                   << agg.sumQueueDelta << "," << trafficArrivalRate << "\n";
-              fofs.close();
-            } else {
-              EV << "WARNING: Cannot open fairness output file (" << fairPath
-                 << ")."
-                 << endl;
-            }
+            std::ostringstream row;
+            row << frameCounter << "," << jainTx << "," << agg.sumPkt << ","
+                << agg.sumQueue << "," << agg.sumArrivals << ","
+                << agg.sumQueueDelta << "," << trafficArrivalRate;
+            writeBufferedCsvRow(
+                fairPath,
+                "frame,jain_tx,sum_delta_packets,sum_queue,sum_arrivals,"
+                "sum_queue_delta,traffic_rate",
+                row.str(), metricsFlushEvery);
           }
 
           gAggByFrame.erase(frameCounter);
@@ -1149,29 +1205,16 @@ void DynamicTDMA::processSlotTimer() {
 
       if (metricsEnabled) {
         const std::string &path = statsCsvPath;
-        std::ofstream ofs(path, std::ios::app);
-
-        if (ofs.is_open()) {
-          // 写表头（若文件为空或刚创建）
-          bool needHeader = false;
-          {
-            std::ifstream ifs(path.c_str());
-            needHeader =
-                (!ifs.is_open()) || (ifs.peek() == std::ifstream::traits_type::eof());
-          }
-          if (needHeader) {
-            ofs << "simTime,frame,nodeId,totalSlotRequests,totalSuccessfulTx,totalSuccessfulPackets,"
-                   "totalGeneratedPrio0,totalGeneratedPrio1,totalGeneratedPrio2\n";
-          }
-          ofs << simTime() << "," << frameCounter << "," << myId << ","
-              << totalSlotRequestCount << "," << totalSuccessfulTxCount << ","
-              << totalSuccessfulPacketCount << "," << totalGeneratedByPriority[0] << ","
-              << totalGeneratedByPriority[1] << "," << totalGeneratedByPriority[2]
-              << "\n";
-          ofs.close();
-        } else {
-          EV << "WARNING: Cannot open stats output file (" << path << ")." << endl;
-        }
+        std::ostringstream row;
+        row << simTime() << "," << frameCounter << "," << myId << ","
+            << totalSlotRequestCount << "," << totalSuccessfulTxCount << ","
+            << totalSuccessfulPacketCount << "," << totalGeneratedByPriority[0] << ","
+            << totalGeneratedByPriority[1] << "," << totalGeneratedByPriority[2];
+        writeBufferedCsvRow(
+            path,
+            "simTime,frame,nodeId,totalSlotRequests,totalSuccessfulTx,totalSuccessfulPackets,"
+            "totalGeneratedPrio0,totalGeneratedPrio1,totalGeneratedPrio2",
+            row.str(), metricsFlushEvery);
       }
 
       // --- 每帧详细指标输出 ---
@@ -1416,41 +1459,29 @@ void DynamicTDMA::processSlotTimer() {
       // 8) 输出 CSV
       if (metricsEnabled) {
         const std::string &framePath = frameMetricsCsvPath;
-        std::ofstream fofs(framePath, std::ios::app);
-        if (fofs.is_open()) {
-          bool needHeader = false;
-          {
-            std::ifstream ifs(framePath.c_str());
-            needHeader =
-                (!ifs.is_open()) || (ifs.peek() == std::ifstream::traits_type::eof());
-          }
-          if (needHeader) {
-            fofs << "simTime,frame,nodeId,Bown,T2hop,Cctrl,mu_nbr,Qt,lambda_ewma,"
-                  "Wt,Sharet,Share_avgnbr,Jlocal,Envy,req_candidates,req_sent,"
-                  "req_rate_observed,req_prob_avg,active_nodes,active_edges,"
-                  "dynamic_mode,event_phase\n";
-          }
-          std::string eventPhase = "static";
-          if (dynamicTopologyMode != "static") {
-            eventPhase = !sTopologyPerturbed
-                             ? "pre"
-                             : (sTopologyRecovered ? "recovery" : "perturb");
-          }
-          fofs << simTime() << "," << frameCounter << "," << myId << ","
-               << "\"" << bownBitmap << "\","
-               << "\"" << t2hop.str() << "\","
-               << ctrlCollisionCount << "," << muNbr << "," << Qt << ","
-               << lambdaEwma << "," << Wt << "," << Sharet << "," << ShareAvgNbr
-               << "," << Jlocal << "," << Envy << "," << reqCandidateCount << ","
-               << reqSentCount << "," << reqRateObserved << "," << reqProbAvg
-               << "," << activeNodeCount() << "," << activeEdgeCount()
-               << "," << dynamicTopologyMode << "," << eventPhase
-               << "\n";
-          fofs.close();
-        } else {
-          EV << "WARNING: Cannot open frame metrics output file (" << framePath
-             << ")." << endl;
+        std::string eventPhase = "static";
+        if (dynamicTopologyMode != "static") {
+          eventPhase = !sTopologyPerturbed
+                           ? "pre"
+                           : (sTopologyRecovered ? "recovery" : "perturb");
         }
+        std::ostringstream row;
+        row << simTime() << "," << frameCounter << "," << myId << ","
+            << "\"" << bownBitmap << "\","
+            << "\"" << t2hop.str() << "\","
+            << ctrlCollisionCount << "," << muNbr << "," << Qt << ","
+            << lambdaEwma << "," << Wt << "," << Sharet << "," << ShareAvgNbr
+            << "," << Jlocal << "," << Envy << "," << reqCandidateCount << ","
+            << reqSentCount << "," << reqRateObserved << "," << reqProbAvg
+            << "," << activeNodeCount() << "," << activeEdgeCount()
+            << "," << dynamicTopologyMode << "," << eventPhase;
+        writeBufferedCsvRow(
+            framePath,
+            "simTime,frame,nodeId,Bown,T2hop,Cctrl,mu_nbr,Qt,lambda_ewma,"
+            "Wt,Sharet,Share_avgnbr,Jlocal,Envy,req_candidates,req_sent,"
+            "req_rate_observed,req_prob_avg,active_nodes,active_edges,"
+            "dynamic_mode,event_phase",
+            row.str(), metricsFlushEvery);
       }
 
     // 9) 分装每个节点的特征输出（JSONL，按帧一行）

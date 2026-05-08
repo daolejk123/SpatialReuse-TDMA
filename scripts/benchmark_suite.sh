@@ -28,6 +28,8 @@ NUM_SLOTS=10
 HEUR_COEF="0.01"
 IDLE_QUEUE_PENALTY=""
 METRICS_MODE="summary"
+METRICS_FLUSH_EVERY="200"
+SIM_LOG_MODE="file"
 SAVE_EVERY="5000"
 TARGET_UPDATES=""
 TARGET_FRAMES=""
@@ -53,6 +55,8 @@ while [[ $# -gt 0 ]]; do
         --heur_coef) HEUR_COEF="$2"; shift 2 ;;
         --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
         --metrics_mode) METRICS_MODE="$2"; shift 2 ;;
+        --metrics_flush_every) METRICS_FLUSH_EVERY="$2"; shift 2 ;;
+        --sim_log_mode) SIM_LOG_MODE="$2"; shift 2 ;;
         --save_every) SAVE_EVERY="$2"; shift 2 ;;
         --target_updates) TARGET_UPDATES="$2"; shift 2 ;;
         --target_frames) TARGET_FRAMES="$2"; shift 2 ;;
@@ -75,6 +79,14 @@ case "$METRICS_MODE" in
     full|summary|off) ;;
     *) echo "[BENCH] metrics_mode 只能是 full、summary 或 off，当前: $METRICS_MODE" >&2; exit 1 ;;
 esac
+case "$SIM_LOG_MODE" in
+    tee|file|quiet) ;;
+    *) echo "[BENCH] sim_log_mode 只能是 tee、file 或 quiet，当前: $SIM_LOG_MODE" >&2; exit 1 ;;
+esac
+if ! [[ "$METRICS_FLUSH_EVERY" =~ ^[0-9]+$ ]]; then
+    echo "[BENCH] metrics_flush_every 必须是非负整数，当前: $METRICS_FLUSH_EVERY" >&2
+    exit 1
+fi
 if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
     echo "[BENCH] jobs 必须是正整数，当前: $JOBS" >&2
     exit 1
@@ -199,6 +211,8 @@ printf 'scenario\tmethod\tseed\tlog_dir\timplementation\tnetwork\trunner\tmacMod
     printf 'heur_coef\t%s\n' "$HEUR_COEF"
     printf 'idle_queue_penalty\t%s\n' "$IDLE_QUEUE_PENALTY"
     printf 'metrics_mode\t%s\n' "$METRICS_MODE"
+    printf 'metrics_flush_every\t%s\n' "$METRICS_FLUSH_EVERY"
+    printf 'sim_log_mode\t%s\n' "$SIM_LOG_MODE"
     printf 'save_every\t%s\n' "$SAVE_EVERY"
     printf 'target_updates\t%s\n' "$TARGET_UPDATES"
     printf 'target_frames\t%s\n' "$TARGET_FRAMES"
@@ -251,6 +265,8 @@ for scenario in $SCENARIOS; do
                     "${SCENARIO_LOAD_ARGS[@]}"
                     "${SCENARIO_DYNAMIC_ARGS[@]}"
                     --metrics_mode "$METRICS_MODE"
+                    --metrics_flush_every "$METRICS_FLUSH_EVERY"
+                    --sim_log_mode "$SIM_LOG_MODE"
                     --jobs "$JOBS"
                     --stale_timeout "$STALE_TIMEOUT"
                     --root_log "$scenario_dir"
@@ -304,6 +320,8 @@ for scenario in $SCENARIOS; do
                         "${SCENARIO_LOAD_ARGS[@]}"
                         "${SCENARIO_DYNAMIC_ARGS[@]}"
                         --metrics_mode "$METRICS_MODE"
+                        --metrics_flush_every "$METRICS_FLUSH_EVERY"
+                        --sim_log_mode "$SIM_LOG_MODE"
                         --stale_timeout "$STALE_TIMEOUT"
                         --log_dir "$log_dir"
                         --metrics_dir "$metrics_dir"

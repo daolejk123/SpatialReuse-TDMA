@@ -175,6 +175,7 @@ protected:
   std::string featureJsonlPath;
   bool metricsEnabled = true;
   bool featureTraceEnabled = true;
+  int metricsFlushEvery = 200;
   std::string macMode = "dynamic_tdma";
 
   // 动态拓扑：逻辑层 active node/edge 过滤，不重连 NED gate
@@ -239,6 +240,7 @@ protected:
 protected:
   virtual void initialize() override;
   virtual void handleMessage(cMessage *msg) override;
+  virtual void finish() override;
 
   // 阶段处理函数
   void processSlotTimer();

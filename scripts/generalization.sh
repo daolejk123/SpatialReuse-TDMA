@@ -8,6 +8,7 @@
 #                              [--scenarios "N12_grid N16_ring"]
 #                              [--groups "baseline B"] [--seeds "1 2"]
 #                              [--jobs 2] [--metrics_mode summary]
+#                              [--metrics_flush_every 200] [--sim_log_mode file]
 #                              [--save_every 5000] [--heur_coef 0.01]
 #                              [--target_updates 400] [--target_frames 50000]
 #                              [--stale_timeout 300]
@@ -29,6 +30,8 @@ NUM_SLOTS=10
 HEUR_COEF="0.01"
 IDLE_QUEUE_PENALTY=""
 METRICS_MODE="summary"
+METRICS_FLUSH_EVERY="200"
+SIM_LOG_MODE="file"
 SAVE_EVERY="5000"
 TARGET_UPDATES=""
 TARGET_FRAMES=""
@@ -48,6 +51,8 @@ while [[ $# -gt 0 ]]; do
         --heur_coef) HEUR_COEF="$2"; shift 2 ;;
         --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
         --metrics_mode) METRICS_MODE="$2"; shift 2 ;;
+        --metrics_flush_every) METRICS_FLUSH_EVERY="$2"; shift 2 ;;
+        --sim_log_mode) SIM_LOG_MODE="$2"; shift 2 ;;
         --save_every) SAVE_EVERY="$2"; shift 2 ;;
         --target_updates) TARGET_UPDATES="$2"; shift 2 ;;
         --target_frames) TARGET_FRAMES="$2"; shift 2 ;;
@@ -63,6 +68,14 @@ case "$METRICS_MODE" in
     full|summary|off) ;;
     *) echo "[GEN] metrics_mode 只能是 full、summary 或 off，当前: $METRICS_MODE" >&2; exit 1 ;;
 esac
+case "$SIM_LOG_MODE" in
+    tee|file|quiet) ;;
+    *) echo "[GEN] sim_log_mode 只能是 tee、file 或 quiet，当前: $SIM_LOG_MODE" >&2; exit 1 ;;
+esac
+if ! [[ "$METRICS_FLUSH_EVERY" =~ ^[0-9]+$ ]]; then
+    echo "[GEN] metrics_flush_every 必须是非负整数，当前: $METRICS_FLUSH_EVERY" >&2
+    exit 1
+fi
 if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
     echo "[GEN] jobs 必须是正整数，当前: $JOBS" >&2
     exit 1
@@ -84,6 +97,7 @@ else
     echo "[GEN] 拓扑: $TOPOLOGIES"
 fi
 echo "[GEN] groups=$ABL_GROUPS seeds=$SEEDS sim_time=${SIM_TIME}s jobs=$JOBS"
+echo "[GEN] metrics_mode=$METRICS_MODE metrics_flush_every=$METRICS_FLUSH_EVERY sim_log_mode=$SIM_LOG_MODE"
 [ -n "$TARGET_UPDATES" ] && echo "[GEN] target_updates=$TARGET_UPDATES"
 [ -n "$TARGET_FRAMES" ] && echo "[GEN] target_frames=$TARGET_FRAMES"
 echo "[GEN] stale_timeout=${STALE_TIMEOUT}s"
@@ -114,6 +128,8 @@ run_scenario() {
             --seeds "$SEEDS"
             --heur_coef "$HEUR_COEF"
             --metrics_mode "$METRICS_MODE"
+            --metrics_flush_every "$METRICS_FLUSH_EVERY"
+            --sim_log_mode "$SIM_LOG_MODE"
             --jobs "$JOBS"
             --stale_timeout "$STALE_TIMEOUT"
             --root_log "$scenario_dir"

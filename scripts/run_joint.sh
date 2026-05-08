@@ -35,6 +35,8 @@
 #   --group NAME         实验组名（仅用于 run_status）
 #   --metrics_dir DIR    网络指标输出目录（默认使用 results/ 下的时间戳文件）
 #   --metrics_mode MODE  full|summary|off（默认 full）
+#   --metrics_flush_every N CSV 指标每 N 行 flush 一次（默认 200）
+#   --sim_log_mode MODE  tee|file|quiet（默认 tee；批量实验建议 file）
 #   --state_pipe PATH    C++→Python 状态 FIFO 路径（默认 /tmp/tdma_rl_state）
 #   --action_pipe PATH   Python→C++ 动作 FIFO 路径（默认 /tmp/tdma_rl_action）
 #   --sim_time N         写入临时 ini 的 sim-time-limit（秒）
@@ -115,9 +117,11 @@ GROUP=""
 SAVE_DIR=""
 METRICS_DIR=""
 METRICS_MODE="full"
+METRICS_FLUSH_EVERY="200"
+SIM_LOG_MODE="tee"
 SIM_TIME=""
 ADAPTIVE_MULTIPLIER=""
-RECORD_EVENTLOG=""
+RECORD_EVENTLOG="false"
 TOPOLOGY_MODE=""
 GRID_COLS=""
 MAC_MODE="dynamic_tdma"
@@ -172,6 +176,8 @@ while [[ $# -gt 0 ]]; do
         --save_dir)     SAVE_DIR="$2";   shift 2 ;;
         --metrics_dir)  METRICS_DIR="$2"; shift 2 ;;
         --metrics_mode) METRICS_MODE="$2"; shift 2 ;;
+        --metrics_flush_every) METRICS_FLUSH_EVERY="$2"; shift 2 ;;
+        --sim_log_mode) SIM_LOG_MODE="$2"; shift 2 ;;
         --state_pipe)   STATE_PIPE="$2"; shift 2 ;;
         --action_pipe)  ACTION_PIPE="$2"; shift 2 ;;
         --sim_time)     SIM_TIME="$2"; shift 2 ;;
@@ -220,6 +226,14 @@ case "$METRICS_MODE" in
     full|summary|off) ;;
     *) error "metrics_mode 只能是 full、summary 或 off，当前: $METRICS_MODE"; exit 1 ;;
 esac
+case "$SIM_LOG_MODE" in
+    tee|file|quiet) ;;
+    *) error "sim_log_mode 只能是 tee、file 或 quiet，当前: $SIM_LOG_MODE"; exit 1 ;;
+esac
+if ! [[ "$METRICS_FLUSH_EVERY" =~ ^[0-9]+$ ]]; then
+    error "metrics_flush_every 必须是非负整数，当前: $METRICS_FLUSH_EVERY"
+    exit 1
+fi
 if [ -n "$TOPOLOGY_MODE" ]; then
     case "$TOPOLOGY_MODE" in
         line|ring|star|grid|clustered|full) ;;
@@ -315,6 +329,8 @@ info "log_dir      = $LOG_DIR"
 info "use_gui      = $USE_GUI"
 [ -n "$METRICS_DIR" ] && info "metrics_dir  = $METRICS_DIR"
 info "metrics_mode = $METRICS_MODE"
+info "metrics_flush_every = $METRICS_FLUSH_EVERY"
+info "sim_log_mode = $SIM_LOG_MODE"
 if [ "$SKIP_PPO" = false ]; then
     info "state_pipe   = $STATE_PIPE"
     info "action_pipe  = $ACTION_PIPE"
@@ -458,8 +474,7 @@ cleanup() {
         info "Python 训练器已退出"
     fi
 
-    # 停止仿真（若还在后台）
-    # SIM_PID 指向 tee 进程，pkill 兜底确保 OMNeT++ 本身也被终止
+    # 停止仿真（若还在后台）；tee 模式下 SIM_PID 指向 tee，pkill 兜底清理 OMNeT++。
     if [ -n "$SIM_PID" ] && kill -0 "$SIM_PID" 2>/dev/null; then
         info "停止 OMNeT++ 仿真 (PID $SIM_PID)..."
         wait_then_kill "$SIM_PID" "OMNeT++ 仿真" "TERM" 5
@@ -488,6 +503,9 @@ cleanup() {
         echo "num_nodes=$NUM_NODES"
         echo "num_slots=$NUM_SLOTS"
         echo "mac_mode=$MAC_MODE"
+        echo "metrics_mode=$METRICS_MODE"
+        echo "metrics_flush_every=$METRICS_FLUSH_EVERY"
+        echo "sim_log_mode=$SIM_LOG_MODE"
         [ -n "$TOPOLOGY_MODE" ] && echo "topology_mode=$TOPOLOGY_MODE"
         [ -n "$DYNAMIC_TOPOLOGY_MODE" ] && echo "dynamic_topology_mode=$DYNAMIC_TOPOLOGY_MODE"
         [ -n "$LOGICAL_TOPOLOGY_MODE" ] && echo "logical_topology_mode=$LOGICAL_TOPOLOGY_MODE"
@@ -566,6 +584,13 @@ set_or_append_ini() {
 
 [ -n "$SIM_TIME" ] && set_or_append_ini '^sim-time-limit[[:space:]]*=' "sim-time-limit = ${SIM_TIME}s"
 [ -n "$RECORD_EVENTLOG" ] && set_or_append_ini '^record-eventlog[[:space:]]*=' "record-eventlog = ${RECORD_EVENTLOG}"
+set_or_append_ini '^cmdenv-express-mode[[:space:]]*=' "cmdenv-express-mode = true"
+set_or_append_ini '^cmdenv-event-banners[[:space:]]*=' "cmdenv-event-banners = false"
+if [ "$SIM_LOG_MODE" = "quiet" ]; then
+    set_or_append_ini '^cmdenv-status-frequency[[:space:]]*=' "cmdenv-status-frequency = 120s"
+else
+    set_or_append_ini '^cmdenv-status-frequency[[:space:]]*=' "cmdenv-status-frequency = 30s"
+fi
 [ -n "$NUM_NODES" ] && set_or_append_ini '^\*\.numNodes[[:space:]]*=' "*.numNodes = ${NUM_NODES}"
 [ -n "$NUM_NODES" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.numNodes[[:space:]]*=' "**.nodes[*].numNodes = ${NUM_NODES}"
 [ -n "$NUM_SLOTS" ] && set_or_append_ini '^\*\.numDataSlots[[:space:]]*=' "*.numDataSlots = ${NUM_SLOTS}"
@@ -590,6 +615,7 @@ set_or_append_ini '^\*\*\.nodes\[\*\]\.macMode[[:space:]]*=' "**.nodes[*].macMod
 [ -n "$RAMP_RATE_STEP" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.rampRateStep[[:space:]]*=' "**.nodes[*].rampRateStep = ${RAMP_RATE_STEP}"
 [ -n "$RAMP_RATE_MAX" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.rampRateMax[[:space:]]*=' "**.nodes[*].rampRateMax = ${RAMP_RATE_MAX}"
 set_or_append_ini '^\*\*\.nodes\[\*\]\.metricsMode[[:space:]]*=' "**.nodes[*].metricsMode = \"${METRICS_MODE}\""
+set_or_append_ini '^\*\*\.nodes\[\*\]\.metricsFlushEvery[[:space:]]*=' "**.nodes[*].metricsFlushEvery = ${METRICS_FLUSH_EVERY}"
 set_or_append_ini '^\*\*\.nodes\[\*\]\.rlStatePipePath[[:space:]]*=' "**.nodes[*].rlStatePipePath = \"${STATE_PIPE}\""
 set_or_append_ini '^\*\*\.nodes\[\*\]\.rlActionPipePath[[:space:]]*=' "**.nodes[*].rlActionPipePath = \"${ACTION_PIPE}\""
 if [ -n "$METRICS_DIR" ]; then
@@ -704,8 +730,16 @@ fi
 info "命令: ${SIM_CMD[*]}"
 
 if [ "$DRY_RUN" = false ]; then
-    "${SIM_CMD[@]}" 2>&1 | tee "$LOG_DIR/sim.log" &
-    SIM_PID=$!
+    case "$SIM_LOG_MODE" in
+        tee)
+            "${SIM_CMD[@]}" 2>&1 | tee "$LOG_DIR/sim.log" &
+            SIM_PID=$!
+            ;;
+        file|quiet)
+            "${SIM_CMD[@]}" > "$LOG_DIR/sim.log" 2>&1 &
+            SIM_PID=$!
+            ;;
+    esac
     info "OMNeT++ 仿真已启动 (PID $SIM_PID)"
     if [ "$SKIP_PPO" = true ]; then
         write_status "running" "" "omnet-only simulation running"

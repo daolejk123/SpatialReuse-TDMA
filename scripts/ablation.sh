@@ -16,6 +16,7 @@
 #                        [--traffic_rate 5.0] [--enable_ramp_traffic true]
 #                        [--enable_adaptive_traffic true]
 #                        [--metrics_mode full|summary|off] [--save_every 5000]
+#                        [--metrics_flush_every 200] [--sim_log_mode file]
 #                        [--target_updates 400] [--target_frames 50000]
 #                        [--stale_timeout 300]
 #                        [--jobs 2] [--root_log logs/custom]
@@ -36,6 +37,8 @@ NUM_NODES=9
 HEUR_COEF="0.01"
 IDLE_QUEUE_PENALTY=""
 METRICS_MODE="full"
+METRICS_FLUSH_EVERY="200"
+SIM_LOG_MODE="file"
 SAVE_EVERY=""
 TARGET_UPDATES=""
 TARGET_FRAMES=""
@@ -84,6 +87,8 @@ while [[ $# -gt 0 ]]; do
         --edge_toggle_ratio) EDGE_TOGGLE_RATIO="$2"; shift 2 ;;
         --switch_topology_mode) SWITCH_TOPOLOGY_MODE="$2"; shift 2 ;;
         --metrics_mode) METRICS_MODE="$2"; shift 2 ;;
+        --metrics_flush_every) METRICS_FLUSH_EVERY="$2"; shift 2 ;;
+        --sim_log_mode) SIM_LOG_MODE="$2"; shift 2 ;;
         --save_every) SAVE_EVERY="$2"; shift 2 ;;
         --target_updates) TARGET_UPDATES="$2"; shift 2 ;;
         --target_frames) TARGET_FRAMES="$2"; shift 2 ;;
@@ -107,6 +112,14 @@ case "$METRICS_MODE" in
     full|summary|off) ;;
     *) error "metrics_mode 只能是 full、summary 或 off，当前: $METRICS_MODE"; exit 1 ;;
 esac
+case "$SIM_LOG_MODE" in
+    tee|file|quiet) ;;
+    *) error "sim_log_mode 只能是 tee、file 或 quiet，当前: $SIM_LOG_MODE"; exit 1 ;;
+esac
+if ! [[ "$METRICS_FLUSH_EVERY" =~ ^[0-9]+$ ]]; then
+    error "metrics_flush_every 必须是非负整数，当前: $METRICS_FLUSH_EVERY"
+    exit 1
+fi
 if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
     error "jobs 必须是正整数，当前: $JOBS"
     exit 1
@@ -158,6 +171,8 @@ info "num_nodes = ${NUM_NODES}, num_slots = ${NUM_SLOTS}"
 info "启用 B 时的 heur_deviation_coef = ${HEUR_COEF}"
 [ -n "$IDLE_QUEUE_PENALTY" ] && info "idle_queue_penalty = ${IDLE_QUEUE_PENALTY}"
 info "metrics_mode = ${METRICS_MODE}"
+info "metrics_flush_every = ${METRICS_FLUSH_EVERY}"
+info "sim_log_mode = ${SIM_LOG_MODE}"
 [ -n "$SAVE_EVERY" ] && info "save_every = ${SAVE_EVERY}"
 [ -n "$TARGET_UPDATES" ] && info "target_updates = ${TARGET_UPDATES}"
 [ -n "$TARGET_FRAMES" ] && info "target_frames = ${TARGET_FRAMES}"
@@ -202,6 +217,7 @@ run_one() {
         [ -n "$DYNAMIC_TOPOLOGY_MODE" ] && info "                   --dynamic_topology_mode $DYNAMIC_TOPOLOGY_MODE \\"
         [ -n "$LOGICAL_TOPOLOGY_MODE" ] && info "                   --logical_topology_mode $LOGICAL_TOPOLOGY_MODE \\"
         info "                   --heur_deviation_coef $HDEV --metrics_mode $METRICS_MODE \\"
+        info "                   --metrics_flush_every $METRICS_FLUSH_EVERY --sim_log_mode $SIM_LOG_MODE \\"
         [ -n "$IDLE_QUEUE_PENALTY" ] && info "                   --idle_queue_penalty $IDLE_QUEUE_PENALTY \\"
         [ -n "$SAVE_EVERY" ] && info "                   --save_every $SAVE_EVERY \\"
         info "                   --log_dir $LOG_DIR --metrics_dir $LOG_DIR/metrics"
@@ -267,6 +283,8 @@ run_one() {
         "${TARGET_ARGS[@]}" \
         --stale_timeout "$STALE_TIMEOUT" \
         --metrics_mode "$METRICS_MODE" \
+        --metrics_flush_every "$METRICS_FLUSH_EVERY" \
+        --sim_log_mode "$SIM_LOG_MODE" \
         --state_pipe "$STATE_PIPE" \
         --action_pipe "$ACTION_PIPE" \
         --log_dir "$LOG_DIR" \
@@ -286,6 +304,9 @@ run_one() {
         [ -n "$TARGET_UPDATES" ] && echo "target_updates=$TARGET_UPDATES"
         [ -n "$TARGET_FRAMES" ] && echo "target_frames=$TARGET_FRAMES"
         echo "stale_timeout=$STALE_TIMEOUT"
+        echo "metrics_mode=$METRICS_MODE"
+        echo "metrics_flush_every=$METRICS_FLUSH_EVERY"
+        echo "sim_log_mode=$SIM_LOG_MODE"
         [ -n "$TOPOLOGY_MODE" ] && echo "topology_mode=$TOPOLOGY_MODE"
         [ -n "$GRID_COLS" ] && echo "grid_cols=$GRID_COLS"
         [ -n "$TRAFFIC_RATE" ] && echo "traffic_rate=$TRAFFIC_RATE"
