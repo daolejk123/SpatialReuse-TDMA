@@ -141,6 +141,16 @@ parse_scenario() {
                 --arena_width 800 --arena_height 800 --comm_range 200 \
                 --mobility_speed_min 5 --mobility_speed_max 15 --mobility_pause_max 1)
             ;;
+        _manet_uav)
+            SCENARIO_MOBILITY_ARGS=(--mobility_mode random_waypoint --link_model distance \
+                --arena_width 1000 --arena_height 1000 --comm_range 250 \
+                --mobility_speed_min 10 --mobility_speed_max 30 --mobility_pause_max 1)
+            ;;
+        _manet_uav_sparse)
+            SCENARIO_MOBILITY_ARGS=(--mobility_mode random_waypoint --link_model distance \
+                --arena_width 1200 --arena_height 1200 --comm_range 180 \
+                --mobility_speed_min 10 --mobility_speed_max 30 --mobility_pause_max 1)
+            ;;
         _manet_dense)
             SCENARIO_MOBILITY_ARGS=(--mobility_mode random_waypoint --link_model distance \
                 --arena_width 300 --arena_height 300 --comm_range 150 \
@@ -341,6 +351,7 @@ for scenario in $SCENARIOS; do
                         --record_eventlog false
                         "${SCENARIO_LOAD_ARGS[@]}"
                         "${SCENARIO_DYNAMIC_ARGS[@]}"
+                        "${SCENARIO_MOBILITY_ARGS[@]}"
                         --metrics_mode "$METRICS_MODE"
                         --metrics_flush_every "$METRICS_FLUSH_EVERY"
                         --sim_log_mode "$SIM_LOG_MODE"
