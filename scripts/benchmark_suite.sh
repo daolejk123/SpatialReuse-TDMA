@@ -341,6 +341,7 @@ for scenario in $SCENARIOS; do
                         --record_eventlog false
                         "${SCENARIO_LOAD_ARGS[@]}"
                         "${SCENARIO_DYNAMIC_ARGS[@]}"
+                        "${SCENARIO_MOBILITY_ARGS[@]}"
                         --metrics_mode "$METRICS_MODE"
                         --metrics_flush_every "$METRICS_FLUSH_EVERY"
                         --sim_log_mode "$SIM_LOG_MODE"

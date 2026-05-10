@@ -37,7 +37,9 @@ simple DynamicTDMA
         // MAC 协议模式：
         // dynamic_tdma = 当前 PPO/启发式混合动态 TDMA；
         // heuristic_only = 仅使用当前启发式申请概率，不读取 PPO 动作；
-        // plain_tdma = 固定 owner slot 的传统 TDMA 基线。
+        // plain_tdma = 固定 owner slot 的传统 TDMA 基线；
+        // greedy_stdma / traffic_adaptive_tdma / zmac_like / trama_like /
+        // bandit_index_proxy = paper-inspired 非学习基线。
         string macMode = default("dynamic_tdma");
 
         // 动态拓扑扰动：只在协议层过滤逻辑链路，不运行时重连 NED gate。
