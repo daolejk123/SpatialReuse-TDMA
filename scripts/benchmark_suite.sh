@@ -151,6 +151,11 @@ parse_scenario() {
                 --arena_width 1200 --arena_height 1200 --comm_range 180 \
                 --mobility_speed_min 10 --mobility_speed_max 30 --mobility_pause_max 1)
             ;;
+        _manet_uav_sparse200)
+            SCENARIO_MOBILITY_ARGS=(--mobility_mode random_waypoint --link_model distance \
+                --arena_width 1200 --arena_height 1200 --comm_range 200 \
+                --mobility_speed_min 10 --mobility_speed_max 30 --mobility_pause_max 1)
+            ;;
         _manet_dense)
             SCENARIO_MOBILITY_ARGS=(--mobility_mode random_waypoint --link_model distance \
                 --arena_width 300 --arena_height 300 --comm_range 150 \
