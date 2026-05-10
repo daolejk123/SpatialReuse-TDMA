@@ -10,6 +10,7 @@
 #include <system_error>
 #include <cctype>
 #include <cmath>
+#include <set>
 #include <utility>
 
 Define_Module(DynamicTDMA);
@@ -260,7 +261,8 @@ void DynamicTDMA::initialize() {
     macMode = lowerAscii(par("macMode").stdstringValue());
   }
   if (macMode != "dynamic_tdma" && macMode != "heuristic_only" &&
-      macMode != "plain_tdma") {
+      macMode != "plain_tdma" && macMode != "greedy_stdma" &&
+      macMode != "traffic_adaptive_tdma") {
     EV << "Unknown macMode=" << macMode
        << ", fallback to dynamic_tdma" << endl;
     macMode = "dynamic_tdma";
@@ -1654,6 +1656,14 @@ void DynamicTDMA::scheduleRequests() {
     schedulePlainTdmaRequests();
     return;
   }
+  if (macMode == "greedy_stdma") {
+    scheduleGreedyStdmaRequests();
+    return;
+  }
+  if (macMode == "traffic_adaptive_tdma") {
+    scheduleTrafficAdaptiveTdmaRequests();
+    return;
+  }
 
   // 挑选要申请时隙的包（最多 numDataSlots 个）
   // 简单策略：遍历队列，取出高优先级，再取低优先级
@@ -1792,6 +1802,219 @@ void DynamicTDMA::schedulePlainTdmaRequests() {
   EV << "PlainTDMA: Node " << myId << " requesting owner Slot "
      << ownerSlot << " for Packet ID=" << pkt.id
      << " (Dest=" << pkt.destId << ", Prio=" << dynamicPrio << ")" << endl;
+}
+
+std::vector<int> DynamicTDMA::computeTwoHopNeighborIds(
+    const std::vector<int> &oneHop) const {
+  std::set<int> oneHopSet(oneHop.begin(), oneHop.end());
+  std::set<int> twoHop;
+  for (int nb : oneHop) {
+    std::vector<int> nbNeighbors = getOneHopNeighborIdsForNode(nb);
+    for (int x : nbNeighbors) {
+      if (x == myId)
+        continue;
+      if (oneHopSet.count(x))
+        continue;
+      twoHop.insert(x);
+    }
+  }
+  return std::vector<int>(twoHop.begin(), twoHop.end());
+}
+
+std::vector<int> DynamicTDMA::computeStdmaSlotCosts(
+    const std::vector<int> &oneHop, const std::vector<int> &twoHop) const {
+  std::set<int> oneHopSet(oneHop.begin(), oneHop.end());
+  std::set<int> twoHopSet(twoHop.begin(), twoHop.end());
+  std::vector<int> cost(numDataSlots, 0);
+  for (int s = 0; s < numDataSlots; s++) {
+    if (s >= (int)occupancyTable.size())
+      break;
+    for (int occ : occupancyTable[s]) {
+      if (oneHopSet.count(occ))
+        cost[s] += 100;
+      else if (twoHopSet.count(occ))
+        cost[s] += 10;
+      else
+        cost[s] += 1;
+    }
+  }
+  return cost;
+}
+
+void DynamicTDMA::scheduleGreedyStdmaRequests() {
+  // 1. 选包：先高优先级，再普通优先级，最多 numDataSlots 个
+  std::vector<size_t> selectedIndices;
+  for (size_t i = 0; i < packetQueue.size(); i++) {
+    if ((int)selectedIndices.size() >= numDataSlots)
+      break;
+    if (packetQueue[i].priority >= 1)
+      selectedIndices.push_back(i);
+  }
+  for (size_t i = 0; i < packetQueue.size(); i++) {
+    if ((int)selectedIndices.size() >= numDataSlots)
+      break;
+    bool already = false;
+    for (size_t idx : selectedIndices)
+      if (idx == i) {
+        already = true;
+        break;
+      }
+    if (!already)
+      selectedIndices.push_back(i);
+  }
+  if (selectedIndices.empty())
+    return;
+
+  // 2. 计算邻居集与时隙打分
+  std::vector<int> oneHop = getOneHopNeighborIds();
+  std::vector<int> twoHop = computeTwoHopNeighborIds(oneHop);
+  std::vector<int> cost = computeStdmaSlotCosts(oneHop, twoHop);
+
+  // 3. 用乱序索引做 tie-breaking，再按 cost 升序排序
+  std::vector<int> slotOrder = SlotSelection::buildSlotOrder(
+      numDataSlots, std::vector<bool>(numDataSlots, false),
+      [this](int lo, int hi) { return intuniform(lo, hi); });
+  std::stable_sort(slotOrder.begin(), slotOrder.end(),
+                   [&cost](int a, int b) { return cost[a] < cost[b]; });
+
+  // 4. 取前 K 个最优时隙绑定到 K 个候选包，按"贪心 + 启发式概率"策略申请：
+  size_t K = selectedIndices.size();
+  long long requestedThisFrame = 0;
+  for (size_t i = 0; i < K && i < slotOrder.size(); i++) {
+    int slot = slotOrder[i];
+    if (slot < 0 || slot >= numDataSlots)
+      continue;
+    const PendingPacket &pkt = packetQueue[selectedIndices[i]];
+    double waitTime = (simTime() - pkt.genTime).dbl();
+    double basePrio = (pkt.priority == 1) ? 0.8 : 0.4;
+    double dynamicPrio = std::min(0.99, basePrio + (waitTime * 0.1));
+    double minProb = (pkt.priority >= 1) ? 0.6 : 0.2;
+    double heurProb = std::max(dynamicPrio, minProb);
+    if ((int)packetQueue.size() >= highLoadThreshold)
+      heurProb = std::min(1.0, heurProb + highLoadProbBoost);
+
+    myDesiredTargets[slot] = pkt.destId;
+    myHeurProbs[slot] = heurProb;
+    reqCandidateCount++;
+    reqProbSum += heurProb;
+    if (uniform(0, 1) < heurProb) {
+      myPriorities[slot] = dynamicPrio;
+      reqSentCount++;
+      requestedThisFrame++;
+      EV << "GreedyStdma: Node " << myId << " requesting Slot " << slot
+         << " (cost=" << cost[slot] << ", Prob=" << heurProb << ")" << endl;
+    } else {
+      myPriorities[slot] = 0.0;
+      myDesiredTargets[slot] = -1;
+    }
+  }
+  totalSlotRequestCount += requestedThisFrame;
+}
+
+void DynamicTDMA::scheduleTrafficAdaptiveTdmaRequests() {
+  if (numDataSlots <= 0)
+    return;
+
+  // 1. 固定 owner slot：保证 plain_tdma 风格的最低吞吐与公平性
+  int ownerSlot = myId % numDataSlots;
+  size_t ownerPickIdx = 0;
+  for (size_t i = 1; i < packetQueue.size(); i++) {
+    if (packetQueue[i].priority > packetQueue[ownerPickIdx].priority)
+      ownerPickIdx = i;
+  }
+  const PendingPacket &ownerPkt = packetQueue[ownerPickIdx];
+  double ownerWait = (simTime() - ownerPkt.genTime).dbl();
+  double ownerBase = (ownerPkt.priority >= 1) ? 0.8 : 0.4;
+  double ownerPrio = std::min(0.99, ownerBase + (ownerWait * 0.1));
+
+  myDesiredTargets[ownerSlot] = ownerPkt.destId;
+  myPriorities[ownerSlot] = ownerPrio;
+  myHeurProbs[ownerSlot] = 1.0;
+  reqCandidateCount++;
+  reqSentCount++;
+  reqProbSum += 1.0;
+  long long requestedThisFrame = 1;
+
+  // 2. 流量压力判定：复用启发式同口径阈值
+  bool pressure = ((int)packetQueue.size() >= highLoadThreshold) ||
+                  (lambdaEwma >= highLoadThreshold * 0.5);
+  if (!pressure || packetQueue.size() <= 1) {
+    totalSlotRequestCount += requestedThisFrame;
+    EV << "TrafficAdaptiveTDMA: Node " << myId << " owner-only Slot "
+       << ownerSlot << " (Q=" << packetQueue.size()
+       << ", lambda=" << lambdaEwma << ")" << endl;
+    return;
+  }
+
+  // 3. 高压力时：在剩余时隙中按 STDMA cost 选 extraBudget 个空间复用机会
+  int extraBudget = (int)std::min<size_t>(
+      (size_t)(numDataSlots - 1),
+      std::min(packetQueue.size() - 1,
+               (size_t)((packetQueue.size() + highLoadThreshold - 1) /
+                        highLoadThreshold)));
+  if (extraBudget <= 0) {
+    totalSlotRequestCount += requestedThisFrame;
+    return;
+  }
+
+  std::vector<int> oneHop = getOneHopNeighborIds();
+  std::vector<int> twoHop = computeTwoHopNeighborIds(oneHop);
+  std::vector<int> cost = computeStdmaSlotCosts(oneHop, twoHop);
+
+  std::vector<int> slotOrder = SlotSelection::buildSlotOrder(
+      numDataSlots, std::vector<bool>(numDataSlots, false),
+      [this](int lo, int hi) { return intuniform(lo, hi); });
+  std::stable_sort(slotOrder.begin(), slotOrder.end(),
+                   [&cost](int a, int b) { return cost[a] < cost[b]; });
+
+  // 选择剩余包：跳过 owner 已用的那个包
+  std::vector<size_t> extraPickIndices;
+  for (size_t i = 0; i < packetQueue.size(); i++) {
+    if (i == ownerPickIdx)
+      continue;
+    extraPickIndices.push_back(i);
+    if ((int)extraPickIndices.size() >= extraBudget)
+      break;
+  }
+
+  int extraUsed = 0;
+  for (int slot : slotOrder) {
+    if (extraUsed >= extraBudget ||
+        extraUsed >= (int)extraPickIndices.size())
+      break;
+    if (slot == ownerSlot)
+      continue;
+    if (slot < 0 || slot >= numDataSlots)
+      continue;
+    if (cost[slot] >= 100)
+      continue; // 1-hop 冲突一律放弃
+
+    const PendingPacket &pkt = packetQueue[extraPickIndices[extraUsed]];
+    double waitTime = (simTime() - pkt.genTime).dbl();
+    double basePrio = (pkt.priority == 1) ? 0.8 : 0.4;
+    double dynamicPrio = std::min(0.99, basePrio + (waitTime * 0.1));
+    double minProb = (pkt.priority >= 1) ? 0.6 : 0.2;
+    double heurProb = std::max(dynamicPrio, minProb);
+    heurProb = std::min(1.0, heurProb + highLoadProbBoost);
+
+    myDesiredTargets[slot] = pkt.destId;
+    myHeurProbs[slot] = heurProb;
+    reqCandidateCount++;
+    reqProbSum += heurProb;
+    if (uniform(0, 1) < heurProb) {
+      myPriorities[slot] = dynamicPrio;
+      reqSentCount++;
+      requestedThisFrame++;
+      EV << "TrafficAdaptiveTDMA: Node " << myId << " extra Slot " << slot
+         << " (cost=" << cost[slot] << ", Q=" << packetQueue.size() << ")"
+         << endl;
+    } else {
+      myPriorities[slot] = 0.0;
+      myDesiredTargets[slot] = -1;
+    }
+    extraUsed++;
+  }
+  totalSlotRequestCount += requestedThisFrame;
 }
 
 void DynamicTDMA::runDeepLearningModel() {

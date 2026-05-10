@@ -262,6 +262,16 @@ protected:
   void generateTraffic();      // 生成新业务
   void scheduleRequests();     // 智能调度 (替代 runDeepLearningModel)
   void schedulePlainTdmaRequests();
+  void scheduleGreedyStdmaRequests();          // STDMA 系贪心空间复用基线
+  void scheduleTrafficAdaptiveTdmaRequests();  // 流量自适应 TDMA 基线
+  // 计算本节点的两跳邻居集合（不含自己与一跳邻居），用于 STDMA 冲突评分
+  std::vector<int> computeTwoHopNeighborIds(
+      const std::vector<int> &oneHop) const;
+  // 基于上一帧 occupancyTable 与邻居关系给每个时隙打 STDMA 冲突分
+  // cost: 一跳冲突 += 100，两跳冲突 += 10，远端节点 += 1（可空间复用）
+  std::vector<int> computeStdmaSlotCosts(
+      const std::vector<int> &oneHop,
+      const std::vector<int> &twoHop) const;
   void runDeepLearningModel(); // (Deprecated)
   void updateOccupancyTable();
   void broadcastPacket(cPacket *pkt);

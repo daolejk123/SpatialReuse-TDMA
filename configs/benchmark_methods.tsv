@@ -6,4 +6,6 @@ D	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	adaptive multi
 DB	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	combined D and B ablation path
 plain_tdma	DynamicTDMA	TDMANetwork	omnet_only	plain_tdma	dynamic_tdma	false	fixed owner-slot TDMA without PPO
 heuristic_only	DynamicTDMA	TDMANetwork	omnet_only	heuristic_only	dynamic_tdma	false	current heuristic scheduler without PPO
+greedy_stdma	DynamicTDMA	TDMANetwork	omnet_only	greedy_stdma	dynamic_tdma	false	paper-inspired greedy spatial-reuse TDMA baseline (not full replication)
+traffic_adaptive_tdma	DynamicTDMA	TDMANetwork	omnet_only	traffic_adaptive_tdma	dynamic_tdma	false	paper-inspired traffic-adaptive TDMA baseline with owner-slot guarantee plus opportunistic reuse
 external	external	-	external	-	canonical	false	placeholder for manually imported literature results
