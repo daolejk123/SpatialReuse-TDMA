@@ -56,6 +56,14 @@
 #   --dropout_ratio F     写入 dropoutRatio
 #   --edge_toggle_ratio F 写入 edgeToggleRatio
 #   --switch_topology_mode MODE 写入 switchTopologyMode
+#   --link_model MODE    legacy_ned|distance（默认 distance；MANET 物理层抽象）
+#   --mobility_mode MODE static|random_waypoint（默认 static）
+#   --arena_width F       MANET arena 宽度（米）
+#   --arena_height F      MANET arena 高度（米）
+#   --comm_range F        unit-disk-graph 通信距离阈值（米，默认 150）
+#   --mobility_speed_min F  RWP 速度下界（m/s，默认 1.0）
+#   --mobility_speed_max F  RWP 速度上界（m/s，默认 3.0）
+#   --mobility_pause_max F  RWP 到达目标后最大暂停时间（s，默认 5.0）
 #   --log_dir DIR        日志目录（默认 logs/<timestamp>）
 #   --gui                使用 GUI 模式运行仿真（默认 Cmdenv 命令行模式）
 #   --rebuild            强制重新编译 DynamicTDMA
@@ -139,6 +147,14 @@ RECOVERY_AT_FRAME=""
 DROPOUT_RATIO=""
 EDGE_TOGGLE_RATIO=""
 SWITCH_TOPOLOGY_MODE=""
+LINK_MODEL=""
+MOBILITY_MODE=""
+ARENA_WIDTH=""
+ARENA_HEIGHT=""
+COMM_RANGE=""
+MOBILITY_SPEED_MIN=""
+MOBILITY_SPEED_MAX=""
+MOBILITY_PAUSE_MAX=""
 
 # --------------------------------------------------------------------------
 # 参数解析
@@ -200,6 +216,14 @@ while [[ $# -gt 0 ]]; do
         --dropout_ratio) DROPOUT_RATIO="$2"; shift 2 ;;
         --edge_toggle_ratio) EDGE_TOGGLE_RATIO="$2"; shift 2 ;;
         --switch_topology_mode) SWITCH_TOPOLOGY_MODE="$2"; shift 2 ;;
+        --link_model)   LINK_MODEL="$2"; shift 2 ;;
+        --mobility_mode) MOBILITY_MODE="$2"; shift 2 ;;
+        --arena_width)  ARENA_WIDTH="$2"; shift 2 ;;
+        --arena_height) ARENA_HEIGHT="$2"; shift 2 ;;
+        --comm_range)   COMM_RANGE="$2"; shift 2 ;;
+        --mobility_speed_min) MOBILITY_SPEED_MIN="$2"; shift 2 ;;
+        --mobility_speed_max) MOBILITY_SPEED_MAX="$2"; shift 2 ;;
+        --mobility_pause_max) MOBILITY_PAUSE_MAX="$2"; shift 2 ;;
         --gui)          USE_GUI=true;     shift ;;
         --rebuild)      REBUILD=true;     shift ;;
         --dry_run)      DRY_RUN=true;     shift ;;
@@ -244,6 +268,18 @@ case "$MAC_MODE" in
     dynamic_tdma|heuristic_only|plain_tdma|greedy_stdma|traffic_adaptive_tdma) ;;
     *) error "mac_mode 只能是 dynamic_tdma、heuristic_only、plain_tdma、greedy_stdma 或 traffic_adaptive_tdma，当前: $MAC_MODE"; exit 1 ;;
 esac
+if [ -n "$LINK_MODEL" ]; then
+    case "$LINK_MODEL" in
+        legacy_ned|distance) ;;
+        *) error "link_model 只能是 legacy_ned 或 distance，当前: $LINK_MODEL"; exit 1 ;;
+    esac
+fi
+if [ -n "$MOBILITY_MODE" ]; then
+    case "$MOBILITY_MODE" in
+        static|random_waypoint) ;;
+        *) error "mobility_mode 只能是 static 或 random_waypoint，当前: $MOBILITY_MODE"; exit 1 ;;
+    esac
+fi
 if [ -n "$DYNAMIC_TOPOLOGY_MODE" ]; then
     case "$DYNAMIC_TOPOLOGY_MODE" in
         static|edge_toggle|topology_switch|node_dropout|node_rejoin) ;;
@@ -314,6 +350,9 @@ info "num_nodes    = $NUM_NODES"
 [ -n "$TOPOLOGY_MODE" ] && info "topology_mode= $TOPOLOGY_MODE"
 [ -n "$GRID_COLS" ] && info "grid_cols    = $GRID_COLS"
 info "mac_mode     = $MAC_MODE"
+[ -n "$LINK_MODEL" ] && info "link_model   = $LINK_MODEL"
+[ -n "$MOBILITY_MODE" ] && info "mobility_mode= $MOBILITY_MODE"
+[ -n "$COMM_RANGE" ] && info "comm_range   = ${COMM_RANGE}m"
 info "skip_ppo     = $SKIP_PPO"
 [ -n "$DYNAMIC_TOPOLOGY_MODE" ] && info "dynamic_topology = $DYNAMIC_TOPOLOGY_MODE"
 [ -n "$LOGICAL_TOPOLOGY_MODE" ] && info "logical_topology = $LOGICAL_TOPOLOGY_MODE"
@@ -614,6 +653,15 @@ set_or_append_ini '^\*\*\.nodes\[\*\]\.macMode[[:space:]]*=' "**.nodes[*].macMod
 [ -n "$RAMP_RATE_START" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.rampRateStart[[:space:]]*=' "**.nodes[*].rampRateStart = ${RAMP_RATE_START}"
 [ -n "$RAMP_RATE_STEP" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.rampRateStep[[:space:]]*=' "**.nodes[*].rampRateStep = ${RAMP_RATE_STEP}"
 [ -n "$RAMP_RATE_MAX" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.rampRateMax[[:space:]]*=' "**.nodes[*].rampRateMax = ${RAMP_RATE_MAX}"
+[ -n "$LINK_MODEL" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.linkModel[[:space:]]*=' "**.nodes[*].linkModel = \"${LINK_MODEL}\""
+[ -n "$MOBILITY_MODE" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.mobilityMode[[:space:]]*=' "**.nodes[*].mobilityMode = \"${MOBILITY_MODE}\""
+[ -n "$ARENA_WIDTH" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.arenaWidth[[:space:]]*=' "**.nodes[*].arenaWidth = ${ARENA_WIDTH}m"
+[ -n "$ARENA_HEIGHT" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.arenaHeight[[:space:]]*=' "**.nodes[*].arenaHeight = ${ARENA_HEIGHT}m"
+[ -n "$COMM_RANGE" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.commRange[[:space:]]*=' "**.nodes[*].commRange = ${COMM_RANGE}m"
+[ -n "$MOBILITY_SPEED_MIN" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.mobilitySpeedMin[[:space:]]*=' "**.nodes[*].mobilitySpeedMin = ${MOBILITY_SPEED_MIN}mps"
+[ -n "$MOBILITY_SPEED_MAX" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.mobilitySpeedMax[[:space:]]*=' "**.nodes[*].mobilitySpeedMax = ${MOBILITY_SPEED_MAX}mps"
+[ -n "$MOBILITY_PAUSE_MAX" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.mobilityPauseMax[[:space:]]*=' "**.nodes[*].mobilityPauseMax = ${MOBILITY_PAUSE_MAX}s"
+[ -n "$SEED" ] && set_or_append_ini '^\*\*\.nodes\[\*\]\.mobilitySeed[[:space:]]*=' "**.nodes[*].mobilitySeed = ${SEED}"
 set_or_append_ini '^\*\*\.nodes\[\*\]\.metricsMode[[:space:]]*=' "**.nodes[*].metricsMode = \"${METRICS_MODE}\""
 set_or_append_ini '^\*\*\.nodes\[\*\]\.metricsFlushEvery[[:space:]]*=' "**.nodes[*].metricsFlushEvery = ${METRICS_FLUSH_EVERY}"
 set_or_append_ini '^\*\*\.nodes\[\*\]\.rlStatePipePath[[:space:]]*=' "**.nodes[*].rlStatePipePath = \"${STATE_PIPE}\""

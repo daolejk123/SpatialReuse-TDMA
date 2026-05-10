@@ -113,6 +113,7 @@ parse_scenario() {
     local scenario="$1"
     SCENARIO_LOAD_ARGS=()
     SCENARIO_DYNAMIC_ARGS=()
+    SCENARIO_MOBILITY_ARGS=()
     SCENARIO_DYNAMIC_MODE="static"
     SCENARIO_PHYSICAL_TOPOLOGY=""
     if [[ ! "$scenario" =~ ^N([0-9]+)_(line|ring|star|grid|clustered|full)(.*)$ ]]; then
@@ -130,6 +131,26 @@ parse_scenario() {
         _load_overload) SCENARIO_LOAD_ARGS=(--traffic_rate 20.0) ;;
         _ramp) SCENARIO_LOAD_ARGS=(--enable_ramp_traffic true) ;;
         _adaptive) SCENARIO_LOAD_ARGS=(--enable_adaptive_traffic true) ;;
+        _manet|_manet_pedestrian)
+            SCENARIO_MOBILITY_ARGS=(--mobility_mode random_waypoint --link_model distance \
+                --arena_width 500 --arena_height 500 --comm_range 150 \
+                --mobility_speed_min 1 --mobility_speed_max 3 --mobility_pause_max 5)
+            ;;
+        _manet_vehicular)
+            SCENARIO_MOBILITY_ARGS=(--mobility_mode random_waypoint --link_model distance \
+                --arena_width 800 --arena_height 800 --comm_range 200 \
+                --mobility_speed_min 5 --mobility_speed_max 15 --mobility_pause_max 1)
+            ;;
+        _manet_dense)
+            SCENARIO_MOBILITY_ARGS=(--mobility_mode random_waypoint --link_model distance \
+                --arena_width 300 --arena_height 300 --comm_range 150 \
+                --mobility_speed_min 1 --mobility_speed_max 3 --mobility_pause_max 5)
+            ;;
+        _manet_sparse)
+            SCENARIO_MOBILITY_ARGS=(--mobility_mode random_waypoint --link_model distance \
+                --arena_width 800 --arena_height 800 --comm_range 150 \
+                --mobility_speed_min 1 --mobility_speed_max 3 --mobility_pause_max 5)
+            ;;
         _edge_toggle)
             SCENARIO_DYNAMIC_MODE="edge_toggle"
             SCENARIO_PHYSICAL_TOPOLOGY="full"
@@ -264,6 +285,7 @@ for scenario in $SCENARIOS; do
                     --heur_coef "$HEUR_COEF"
                     "${SCENARIO_LOAD_ARGS[@]}"
                     "${SCENARIO_DYNAMIC_ARGS[@]}"
+                    "${SCENARIO_MOBILITY_ARGS[@]}"
                     --metrics_mode "$METRICS_MODE"
                     --metrics_flush_every "$METRICS_FLUSH_EVERY"
                     --sim_log_mode "$SIM_LOG_MODE"

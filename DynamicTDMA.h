@@ -196,6 +196,34 @@ protected:
   static std::vector<std::vector<bool>> sActiveEdges;
   static std::vector<std::vector<bool>> sScenarioEdges;
 
+  // MANET 物理层抽象（L1 mobility + unit-disk graph）
+  // linkModel: legacy_ned = 旧逻辑（sBaseEdges 来自 NED 或 buildTopologyEdges）；
+  //            distance   = 距离驱动（unit-disk-graph，sActiveEdges 由 mobility 重算）
+  // mobilityMode: static = 节点位置不变；random_waypoint = RWP 移动模型
+  std::string linkModel = "distance";
+  std::string mobilityMode = "static";
+  double arenaWidth = 500.0;
+  double arenaHeight = 500.0;
+  double commRange = 150.0;
+  double mobilitySpeedMin = 1.0;
+  double mobilitySpeedMax = 3.0;
+  double mobilityPauseMax = 5.0;
+  int mobilitySeed = 42;
+  // 全局静态：所有节点共享同一份位置/速度状态（OMNeT++ 单线程，无竞争）
+  static bool sMobilityInitialized;
+  static std::string sMobilityModeGlobal;
+  static std::string sLinkModelGlobal;
+  static std::vector<double> sNodePosX;
+  static std::vector<double> sNodePosY;
+  static std::vector<double> sNodeTargetX;
+  static std::vector<double> sNodeTargetY;
+  static std::vector<double> sNodeSpeed;
+  static std::vector<double> sNodePauseUntil;
+  static double sLastMobilityUpdateTime;
+  static double sCommRangeGlobal;
+  static double sArenaWidthGlobal;
+  static double sArenaHeightGlobal;
+
   // RL 同步参数（从 omnetpp.ini 读取）
   // rlSyncInterval = 0：异步（不等待，原有行为）
   // rlSyncInterval = N：每 N 帧由 node 0 阻塞等待 Python 动作到达，确保 on-policy 对齐
@@ -282,6 +310,11 @@ protected:
   void applyNodeDropout(bool rejoinMode);
   void applyEdgeToggle();
   void logTopologyEvent(const std::string &event, const std::string &message);
+  // MANET mobility helpers (实现于 DynamicTDMA.cc)
+  void initMobilityIfNeeded();      // 第一次进入：摆位 + 初始化 RWP 状态 + 重算 sActiveEdges
+  void layoutInitialPositions(const std::string &topologyShape);
+  void applyMobilityForFrame();     // 推进位置 + 重算 sActiveEdges（distance 模式专用）
+  double nodeDistance(int a, int b) const;
   bool isNodeActive(int nodeId) const;
   bool isActiveLink(int srcId, int dstId) const;
   int activeNodeCount() const;

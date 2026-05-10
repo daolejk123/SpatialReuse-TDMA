@@ -86,6 +86,14 @@ while [[ $# -gt 0 ]]; do
         --dropout_ratio) DROPOUT_RATIO="$2"; shift 2 ;;
         --edge_toggle_ratio) EDGE_TOGGLE_RATIO="$2"; shift 2 ;;
         --switch_topology_mode) SWITCH_TOPOLOGY_MODE="$2"; shift 2 ;;
+        --link_model) LINK_MODEL="$2"; shift 2 ;;
+        --mobility_mode) MOBILITY_MODE="$2"; shift 2 ;;
+        --arena_width) ARENA_WIDTH="$2"; shift 2 ;;
+        --arena_height) ARENA_HEIGHT="$2"; shift 2 ;;
+        --comm_range) COMM_RANGE="$2"; shift 2 ;;
+        --mobility_speed_min) MOBILITY_SPEED_MIN="$2"; shift 2 ;;
+        --mobility_speed_max) MOBILITY_SPEED_MAX="$2"; shift 2 ;;
+        --mobility_pause_max) MOBILITY_PAUSE_MAX="$2"; shift 2 ;;
         --metrics_mode) METRICS_MODE="$2"; shift 2 ;;
         --metrics_flush_every) METRICS_FLUSH_EVERY="$2"; shift 2 ;;
         --sim_log_mode) SIM_LOG_MODE="$2"; shift 2 ;;
@@ -258,6 +266,15 @@ run_one() {
     [ -n "$DROPOUT_RATIO" ] && DYNAMIC_ARGS+=(--dropout_ratio "$DROPOUT_RATIO")
     [ -n "$EDGE_TOGGLE_RATIO" ] && DYNAMIC_ARGS+=(--edge_toggle_ratio "$EDGE_TOGGLE_RATIO")
     [ -n "$SWITCH_TOPOLOGY_MODE" ] && DYNAMIC_ARGS+=(--switch_topology_mode "$SWITCH_TOPOLOGY_MODE")
+    local MOBILITY_ARGS=()
+    [ -n "$LINK_MODEL" ] && MOBILITY_ARGS+=(--link_model "$LINK_MODEL")
+    [ -n "$MOBILITY_MODE" ] && MOBILITY_ARGS+=(--mobility_mode "$MOBILITY_MODE")
+    [ -n "$ARENA_WIDTH" ] && MOBILITY_ARGS+=(--arena_width "$ARENA_WIDTH")
+    [ -n "$ARENA_HEIGHT" ] && MOBILITY_ARGS+=(--arena_height "$ARENA_HEIGHT")
+    [ -n "$COMM_RANGE" ] && MOBILITY_ARGS+=(--comm_range "$COMM_RANGE")
+    [ -n "$MOBILITY_SPEED_MIN" ] && MOBILITY_ARGS+=(--mobility_speed_min "$MOBILITY_SPEED_MIN")
+    [ -n "$MOBILITY_SPEED_MAX" ] && MOBILITY_ARGS+=(--mobility_speed_max "$MOBILITY_SPEED_MAX")
+    [ -n "$MOBILITY_PAUSE_MAX" ] && MOBILITY_ARGS+=(--mobility_pause_max "$MOBILITY_PAUSE_MAX")
     local PIPE_SUFFIX
     PIPE_SUFFIX="$(printf '%s_seed%s_%s' "$group" "$seed" "$$" | tr -c 'A-Za-z0-9_' '_')"
     local STATE_PIPE="/tmp/tdma_rl_state_${PIPE_SUFFIX}"
@@ -277,6 +294,7 @@ run_one() {
         "${TOPOLOGY_ARGS[@]}" \
         "${TRAFFIC_ARGS[@]}" \
         "${DYNAMIC_ARGS[@]}" \
+        "${MOBILITY_ARGS[@]}" \
         --heur_deviation_coef "$HDEV" \
         "${IDLE_ARGS[@]}" \
         "${SAVE_ARGS[@]}" \

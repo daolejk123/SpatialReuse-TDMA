@@ -55,6 +55,20 @@ simple DynamicTDMA
         // true  = mult_max = 2.0 / (1.0 + 0.2 * numOneHopNeighbors)，邻居多的节点压缩探索空间
         bool adaptiveMultiplier = default(false);
 
+        // MANET 物理层抽象（L1 mobility + unit-disk graph）
+        // linkModel:    legacy_ned = sActiveEdges 由逻辑拓扑决定（向后兼容）；
+        //               distance   = 距离驱动 unit-disk-graph（默认）
+        // mobilityMode: static = 节点位置不变；random_waypoint = RWP 随机航点移动
+        string linkModel = default("distance");
+        string mobilityMode = default("static");
+        double arenaWidth @unit(m) = default(500m);
+        double arenaHeight @unit(m) = default(500m);
+        double commRange @unit(m) = default(150m);
+        double mobilitySpeedMin @unit(mps) = default(1mps);
+        double mobilitySpeedMax @unit(mps) = default(3mps);
+        double mobilityPauseMax @unit(s) = default(5s);
+        int mobilitySeed = default(42);
+
         // 指标输出目录；为空时沿用 results/ 下按时间戳命名的默认输出。
         string metricsOutputDir = default("");
         // full=完整 CSV+node_features，summary=仅 CSV，off=关闭磁盘指标输出。

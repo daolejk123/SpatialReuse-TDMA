@@ -34,6 +34,19 @@ std::vector<bool> DynamicTDMA::sActiveNodes;
 std::vector<std::vector<bool>> DynamicTDMA::sBaseEdges;
 std::vector<std::vector<bool>> DynamicTDMA::sActiveEdges;
 std::vector<std::vector<bool>> DynamicTDMA::sScenarioEdges;
+bool DynamicTDMA::sMobilityInitialized = false;
+std::string DynamicTDMA::sMobilityModeGlobal = "static";
+std::string DynamicTDMA::sLinkModelGlobal = "distance";
+std::vector<double> DynamicTDMA::sNodePosX;
+std::vector<double> DynamicTDMA::sNodePosY;
+std::vector<double> DynamicTDMA::sNodeTargetX;
+std::vector<double> DynamicTDMA::sNodeTargetY;
+std::vector<double> DynamicTDMA::sNodeSpeed;
+std::vector<double> DynamicTDMA::sNodePauseUntil;
+double DynamicTDMA::sLastMobilityUpdateTime = 0.0;
+double DynamicTDMA::sCommRangeGlobal = 150.0;
+double DynamicTDMA::sArenaWidthGlobal = 500.0;
+double DynamicTDMA::sArenaHeightGlobal = 500.0;
 
 namespace {
 struct BufferedCsvWriter {
@@ -311,6 +324,51 @@ void DynamicTDMA::initialize() {
     edgeToggleRatio = 0.0;
   if (edgeToggleRatio > 1.0)
     edgeToggleRatio = 1.0;
+
+  // MANET 物理层抽象参数
+  if (hasPar("linkModel"))
+    linkModel = lowerAscii(par("linkModel").stdstringValue());
+  if (linkModel != "legacy_ned" && linkModel != "distance") {
+    EV << "Unknown linkModel=" << linkModel
+       << ", fallback to distance" << endl;
+    linkModel = "distance";
+  }
+  if (hasPar("mobilityMode"))
+    mobilityMode = lowerAscii(par("mobilityMode").stdstringValue());
+  if (mobilityMode != "static" && mobilityMode != "random_waypoint") {
+    EV << "Unknown mobilityMode=" << mobilityMode
+       << ", fallback to static" << endl;
+    mobilityMode = "static";
+  }
+  if (hasPar("arenaWidth"))
+    arenaWidth = par("arenaWidth").doubleValue();
+  if (hasPar("arenaHeight"))
+    arenaHeight = par("arenaHeight").doubleValue();
+  if (hasPar("commRange"))
+    commRange = par("commRange").doubleValue();
+  if (hasPar("mobilitySpeedMin"))
+    mobilitySpeedMin = par("mobilitySpeedMin").doubleValue();
+  if (hasPar("mobilitySpeedMax"))
+    mobilitySpeedMax = par("mobilitySpeedMax").doubleValue();
+  if (hasPar("mobilityPauseMax"))
+    mobilityPauseMax = par("mobilityPauseMax").doubleValue();
+  if (hasPar("mobilitySeed"))
+    mobilitySeed = par("mobilitySeed");
+  if (arenaWidth <= 0.0) arenaWidth = 500.0;
+  if (arenaHeight <= 0.0) arenaHeight = 500.0;
+  if (commRange <= 0.0) commRange = 150.0;
+  if (mobilitySpeedMin < 0.0) mobilitySpeedMin = 0.0;
+  if (mobilitySpeedMax < mobilitySpeedMin) mobilitySpeedMax = mobilitySpeedMin;
+  if (mobilityPauseMax < 0.0) mobilityPauseMax = 0.0;
+  // 互斥校验：RWP 与 topology_switch 同时启用会出现位置 warp 与拓扑切换打架
+  if (mobilityMode == "random_waypoint" &&
+      dynamicTopologyMode == "topology_switch") {
+    EV << "WARNING: mobilityMode=random_waypoint conflicts with "
+          "dynamicTopologyMode=topology_switch; forcing dynamicTopologyMode=static"
+       << endl;
+    dynamicTopologyMode = "static";
+  }
+
   lastGeneratedThisFrame = 0;
   prevQueueSize = 0;
 
@@ -475,6 +533,7 @@ void DynamicTDMA::initialize() {
   frameSuccessfulSlots.assign(numDataSlots, false);
   nodeOccHistory.assign(numNodes, std::deque<int>{});
   initializeLogicalTopology();
+  initMobilityIfNeeded();
 
   // 初始进入 Request Phase
   currentState = STATE_REQUEST_PHASE;
@@ -710,8 +769,16 @@ void DynamicTDMA::initializeLogicalTopology() {
   sTopologyPerturbed = false;
   sTopologyRecovered = false;
   sActiveNodes.assign(numNodes, true);
-  sBaseEdges = logicalTopologyMode.empty() ? buildGateEdges()
-                                           : buildTopologyEdges(logicalTopologyMode);
+  // Network.ned 现为全互连，logicalTopologyMode 空时回退到网络级 topologyMode，
+  // 避免 sBaseEdges 退化为全互连后导致 legacy_ned 模式的拓扑语义丢失。
+  std::string baseShape = logicalTopologyMode;
+  if (baseShape.empty()) {
+    const cModule *parent = getParentModule();
+    if (parent && parent->hasPar("topologyMode"))
+      baseShape = lowerAscii(parent->par("topologyMode").stdstringValue());
+  }
+  sBaseEdges = baseShape.empty() ? buildGateEdges()
+                                 : buildTopologyEdges(baseShape);
   sActiveEdges = sBaseEdges;
   sScenarioEdges = buildTopologyEdges(switchTopologyMode);
 }
@@ -875,7 +942,13 @@ void DynamicTDMA::applyNodeDropout(bool rejoinMode) {
 }
 
 void DynamicTDMA::applyDynamicTopologyForFrame(long long frame) {
-  if (myId != 0 || dynamicTopologyMode == "static")
+  if (myId != 0)
+    return;
+  // MANET 物理层：每帧推进位置并按距离重写 sActiveEdges（如果启用）
+  if (linkModel == "distance" && mobilityMode == "random_waypoint") {
+    applyMobilityForFrame();
+  }
+  if (dynamicTopologyMode == "static")
     return;
   if (!sTopologyPerturbed && frame >= perturbAtFrame) {
     sTopologyPerturbed = true;
@@ -903,6 +976,188 @@ void DynamicTDMA::applyDynamicTopologyForFrame(long long frame) {
     sActiveNodes.assign(numNodes, true);
     sActiveEdges = sBaseEdges;
     logTopologyEvent("recover", "restore base logical topology");
+  }
+}
+
+// ---------------- MANET mobility 实现 ----------------
+double DynamicTDMA::nodeDistance(int a, int b) const {
+  if (a < 0 || b < 0 || a >= (int)sNodePosX.size() ||
+      b >= (int)sNodePosX.size())
+    return 0.0;
+  double dx = sNodePosX[a] - sNodePosX[b];
+  double dy = sNodePosY[a] - sNodePosY[b];
+  return std::sqrt(dx * dx + dy * dy);
+}
+
+void DynamicTDMA::layoutInitialPositions(const std::string &topologyShape) {
+  // 自适应：让初始邻接关系与 commRange 相容（safety = 0.7）
+  // ring/star 外圆半径用 R = commRange / (2 sin(π/N) / 0.7)
+  // grid/line 节点间距用 spacing = 0.7 * commRange
+  const double safety = 0.7;
+  const double cx = sArenaWidthGlobal / 2.0;
+  const double cy = sArenaHeightGlobal / 2.0;
+  sNodePosX.assign(numNodes, cx);
+  sNodePosY.assign(numNodes, cy);
+
+  if (topologyShape == "ring") {
+    double R = (numNodes >= 2)
+                   ? (safety * sCommRangeGlobal / (2.0 * std::sin(M_PI / numNodes)))
+                   : 0.0;
+    R = std::min(R, 0.45 * std::min(sArenaWidthGlobal, sArenaHeightGlobal));
+    for (int i = 0; i < numNodes; i++) {
+      double theta = 2.0 * M_PI * i / std::max(1, numNodes);
+      sNodePosX[i] = cx + R * std::cos(theta);
+      sNodePosY[i] = cy + R * std::sin(theta);
+    }
+  } else if (topologyShape == "line") {
+    double spacing = safety * sCommRangeGlobal;
+    spacing = std::min(spacing,
+                       sArenaWidthGlobal / std::max(1, numNodes - 1) * 0.95);
+    double x0 = cx - spacing * (numNodes - 1) / 2.0;
+    for (int i = 0; i < numNodes; i++) {
+      sNodePosX[i] = x0 + spacing * i;
+      sNodePosY[i] = cy;
+    }
+  } else if (topologyShape == "star") {
+    double R = safety * sCommRangeGlobal;
+    R = std::min(R, 0.45 * std::min(sArenaWidthGlobal, sArenaHeightGlobal));
+    sNodePosX[0] = cx;
+    sNodePosY[0] = cy;
+    int outer = std::max(1, numNodes - 1);
+    for (int i = 1; i < numNodes; i++) {
+      double theta = 2.0 * M_PI * (i - 1) / outer;
+      sNodePosX[i] = cx + R * std::cos(theta);
+      sNodePosY[i] = cy + R * std::sin(theta);
+    }
+  } else if (topologyShape == "grid") {
+    int gridCols = 3;
+    const cModule *parent = getParentModule();
+    if (parent && parent->hasPar("gridCols"))
+      gridCols = parent->par("gridCols");
+    if (gridCols <= 0) gridCols = 1;
+    int gridRows = (numNodes + gridCols - 1) / gridCols;
+    double spacing = safety * sCommRangeGlobal;
+    double maxSpacingX = sArenaWidthGlobal / (gridCols + 1);
+    double maxSpacingY = sArenaHeightGlobal / (gridRows + 1);
+    spacing = std::min(spacing, std::min(maxSpacingX, maxSpacingY));
+    double x0 = cx - spacing * (gridCols - 1) / 2.0;
+    double y0 = cy - spacing * (gridRows - 1) / 2.0;
+    for (int i = 0; i < numNodes; i++) {
+      int r = i / gridCols;
+      int c = i % gridCols;
+      sNodePosX[i] = x0 + spacing * c;
+      sNodePosY[i] = y0 + spacing * r;
+    }
+  } else if (topologyShape == "clustered") {
+    int half = numNodes / 2;
+    double clusterR = 0.4 * sCommRangeGlobal;
+    double clusterCx[2] = {sArenaWidthGlobal * 0.3, sArenaWidthGlobal * 0.7};
+    double clusterCy = cy;
+    for (int i = 0; i < numNodes; i++) {
+      int g = (i < half) ? 0 : 1;
+      double theta = uniform(0.0, 2.0 * M_PI);
+      double r = uniform(0.0, clusterR);
+      sNodePosX[i] = clusterCx[g] + r * std::cos(theta);
+      sNodePosY[i] = clusterCy + r * std::sin(theta);
+    }
+  } else { // "full" 或未知 → 均匀随机
+    for (int i = 0; i < numNodes; i++) {
+      sNodePosX[i] = uniform(0.0, sArenaWidthGlobal);
+      sNodePosY[i] = uniform(0.0, sArenaHeightGlobal);
+    }
+  }
+}
+
+void DynamicTDMA::initMobilityIfNeeded() {
+  if (sMobilityInitialized || myId != 0)
+    return;
+  sMobilityInitialized = true;
+  sMobilityModeGlobal = mobilityMode;
+  sLinkModelGlobal = linkModel;
+  sCommRangeGlobal = commRange;
+  sArenaWidthGlobal = arenaWidth;
+  sArenaHeightGlobal = arenaHeight;
+  sLastMobilityUpdateTime = simTime().dbl();
+
+  // 决定初始几何布局形状：优先 logicalTopologyMode（节点级），否则父模块 topologyMode
+  std::string layoutShape = logicalTopologyMode;
+  if (layoutShape.empty()) {
+    const cModule *parent = getParentModule();
+    if (parent && parent->hasPar("topologyMode"))
+      layoutShape = lowerAscii(parent->par("topologyMode").stdstringValue());
+  }
+  if (layoutShape.empty())
+    layoutShape = "ring";
+  layoutInitialPositions(layoutShape);
+
+  // RWP 初始目标 / 速度（即使 static 也填，便于切换）
+  sNodeTargetX.assign(numNodes, 0.0);
+  sNodeTargetY.assign(numNodes, 0.0);
+  sNodeSpeed.assign(numNodes, 0.0);
+  sNodePauseUntil.assign(numNodes, 0.0);
+  for (int i = 0; i < numNodes; i++) {
+    sNodeTargetX[i] = uniform(0.0, sArenaWidthGlobal);
+    sNodeTargetY[i] = uniform(0.0, sArenaHeightGlobal);
+    sNodeSpeed[i] = uniform(mobilitySpeedMin, mobilitySpeedMax);
+  }
+
+  // distance 模式：初始 sActiveEdges 由距离重算（覆盖 logical topology）
+  if (linkModel == "distance") {
+    if ((int)sActiveEdges.size() != numNodes)
+      sActiveEdges.assign(numNodes, std::vector<bool>(numNodes, false));
+    for (int i = 0; i < numNodes; i++) {
+      sActiveEdges[i].assign(numNodes, false);
+      for (int j = 0; j < numNodes; j++) {
+        if (i == j) continue;
+        sActiveEdges[i][j] = (nodeDistance(i, j) <= sCommRangeGlobal);
+      }
+    }
+  }
+
+  EV << "[Mobility] init: linkModel=" << linkModel
+     << " mobilityMode=" << mobilityMode
+     << " arena=" << arenaWidth << "x" << arenaHeight
+     << " commRange=" << commRange << endl;
+}
+
+void DynamicTDMA::applyMobilityForFrame() {
+  if (!sMobilityInitialized) return;
+  double now = simTime().dbl();
+  double dt = now - sLastMobilityUpdateTime;
+  if (dt < 0.0) dt = 0.0;
+  sLastMobilityUpdateTime = now;
+
+  for (int i = 0; i < numNodes; i++) {
+    if (now < sNodePauseUntil[i]) continue;
+    double dx = sNodeTargetX[i] - sNodePosX[i];
+    double dy = sNodeTargetY[i] - sNodePosY[i];
+    double dist = std::sqrt(dx * dx + dy * dy);
+    if (dist < 1e-3) {
+      sNodePauseUntil[i] = now + uniform(0.0, mobilityPauseMax);
+      sNodeTargetX[i] = uniform(0.0, sArenaWidthGlobal);
+      sNodeTargetY[i] = uniform(0.0, sArenaHeightGlobal);
+      sNodeSpeed[i] = uniform(mobilitySpeedMin, mobilitySpeedMax);
+      continue;
+    }
+    double step = std::min(dist, sNodeSpeed[i] * dt);
+    sNodePosX[i] += step * dx / dist;
+    sNodePosY[i] += step * dy / dist;
+    if (sNodePosX[i] < 0.0) sNodePosX[i] = 0.0;
+    if (sNodePosY[i] < 0.0) sNodePosY[i] = 0.0;
+    if (sNodePosX[i] > sArenaWidthGlobal) sNodePosX[i] = sArenaWidthGlobal;
+    if (sNodePosY[i] > sArenaHeightGlobal) sNodePosY[i] = sArenaHeightGlobal;
+  }
+
+  // 重算邻接矩阵（unit-disk graph）
+  if ((int)sActiveEdges.size() != numNodes)
+    sActiveEdges.assign(numNodes, std::vector<bool>(numNodes, false));
+  for (int i = 0; i < numNodes; i++) {
+    if ((int)sActiveEdges[i].size() != numNodes)
+      sActiveEdges[i].assign(numNodes, false);
+    for (int j = 0; j < numNodes; j++) {
+      if (i == j) { sActiveEdges[i][j] = false; continue; }
+      sActiveEdges[i][j] = (nodeDistance(i, j) <= sCommRangeGlobal);
+    }
   }
 }
 
@@ -1877,7 +2132,7 @@ void DynamicTDMA::scheduleGreedyStdmaRequests() {
   std::stable_sort(slotOrder.begin(), slotOrder.end(),
                    [&cost](int a, int b) { return cost[a] < cost[b]; });
 
-  // 4. 取前 K 个最优时隙绑定到 K 个候选包，按"贪心 + 启发式概率"策略申请：
+  // 4. 取前 K 个最优时隙绑定到 K 个候选包，按启发式概率做 Bernoulli 采样
   size_t K = selectedIndices.size();
   long long requestedThisFrame = 0;
   for (size_t i = 0; i < K && i < slotOrder.size(); i++) {

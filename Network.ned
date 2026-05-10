@@ -15,37 +15,11 @@ network TDMANetwork
             @display("p=100,100,ring"); // 环形排列节点
         }
 
+    // 全互连 gate（i!=j）：运行期由 DynamicTDMA::isActiveLink() 按距离/逻辑拓扑过滤。
+    // topologyMode 参数仍保留，但只用于 C++ 侧的"初始几何布局"决定（layoutInitialPositions）
+    // 与 buildTopologyEdges 的 legacy_ned 路径，不再决定 NED 连接结构。
     connections allowunconnected:
         for i=0..numNodes-1, for j=0..numNodes-1 {
-            nodes[i].radioOut++ --> nodes[j].radioIn++ if
-                topologyMode == "full" && i != j;
-
-            nodes[i].radioOut++ --> nodes[j].radioIn++ if
-                topologyMode == "line" &&
-                (j == i + 1 || j == i - 1);
-
-            nodes[i].radioOut++ --> nodes[j].radioIn++ if
-                topologyMode == "ring" &&
-                (j == i + 1 || j == i - 1 ||
-                 (i == 0 && j == numNodes - 1) ||
-                 (i == numNodes - 1 && j == 0));
-
-            nodes[i].radioOut++ --> nodes[j].radioIn++ if
-                topologyMode == "star" &&
-                ((i == 0 && j != 0) || (j == 0 && i != 0));
-
-            nodes[i].radioOut++ --> nodes[j].radioIn++ if
-                topologyMode == "grid" &&
-                ((j == i + 1 && (i + 1) % gridCols != 0) ||
-                 (j == i - 1 && i % gridCols != 0) ||
-                 j == i + gridCols ||
-                 j == i - gridCols);
-
-            nodes[i].radioOut++ --> nodes[j].radioIn++ if
-                topologyMode == "clustered" && i != j &&
-                (((i < numNodes / 2) && (j < numNodes / 2)) ||
-                 ((i >= numNodes / 2) && (j >= numNodes / 2)) ||
-                 (i == numNodes / 2 - 1 && j == numNodes / 2) ||
-                 (i == numNodes / 2 && j == numNodes / 2 - 1));
+            nodes[i].radioOut++ --> nodes[j].radioIn++ if i != j;
         }
 }
