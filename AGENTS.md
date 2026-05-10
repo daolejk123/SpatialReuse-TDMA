@@ -84,3 +84,5 @@ git checkout -b server-b/<task-name>
 ```
 
 不要覆盖另一台服务器的 `logs/<suite>`，不要重复跑登记为 `accepted_for_paper` 的正式主表实验，除非登记文档明确标记该批次无效或需要复核。
+
+当用户讨论多服务器协同、跨服务器同步、让另一台 Codex/Claude 继续推进、或询问“给另一台服务器怎么说”时，默认准备一段可直接转发给另一台 agent 的指令块。指令块应包含：当前已确认的 remote/branch/commit、需要执行的 `git fetch`/`pull`/`checkout` 命令、必须阅读的文档、不要重复运行的实验目录、推荐分支名和唯一 suite 名、完成后需要更新的交接文档与 `docs/协同实验运行登记.md`。若另一台服务器已有本地改动，优先要求其新建 `server-a/<task>` 或 `server-b/<task>` 分支提交，不要直接覆盖 `master`。
