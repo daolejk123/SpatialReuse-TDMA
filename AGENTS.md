@@ -1,80 +1,86 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+## 项目结构与模块组织
 
-This repository is an OMNeT++ 6.3 simulation with a Python RL training loop.
+本仓库是基于 OMNeT++ 6.3+ 的动态 TDMA MAC 仿真系统，并集成 Python PPO/LSTM 在线调度。C++ 仿真核心在仓库根目录：`DynamicTDMA.cc/.h`、`SlotSelection.cc/.h`、`TDMA_Messages.msg`、`DynamicTDMA.ned`、`Network.ned`、`omnetpp.ini`。Python RL 模块在 `rl/`，启动与实验脚本在 `scripts/`，文档在 `README.md`、`INSTALL.md`、`docs/`。运行输出与实验产物主要写入 `logs/`、`results/`、`out/`、`checkpoints/`。
 
-- `DynamicTDMA.cc/.h`, `SlotSelection.cc/.h`: C++ MAC protocol and slot selection logic.
-- `TDMA_Messages.msg`: OMNeT++ message definitions; generated files are `TDMA_Messages_m.cc/.h`.
-- `DynamicTDMA.ned`, `Network.ned`, `omnetpp.ini`: module definitions, topology, and default simulation configuration.
-- `rl/`: Python receiver, PPO trainer, agent models, and feature utilities.
-- `scripts/`: experiment launchers and summarizers, especially `run_joint.sh`.
-- `configs/`, `docs/`: benchmark metadata and Chinese project notes.
-- Runtime outputs are written to `logs/`, `results/`, and `checkpoints/`.
+## 构建、测试与开发命令
 
-## Build, Test, and Development Commands
-
-Activate OMNeT++ before building or running:
+每个新终端先激活 OMNeT++ 环境。server-a 常用路径：
 
 ```bash
 source /opt/omnetpp-6.3.0/.venv/bin/activate
 source /opt/omnetpp-6.3.0/setenv -f
 ```
 
-Build the simulator:
+server-b 常用路径：
+
+```bash
+source /home/opp_env/omnetpp-6.3.0/setenv
+```
+
+常用命令：
 
 ```bash
 make -j$(nproc) MODE=release
-```
-
-Regenerate the Makefile if source layout changes:
-
-```bash
-opp_makemake -f --deep -O out -I. -o DynamicTDMA
-```
-
-Run a short simulator smoke test:
-
-```bash
-./DynamicTDMA -f omnetpp.ini -u Cmdenv --sim-time-limit=3s --record-eventlog=false
-```
-
-Run the C++/Python joint workflow:
-
-```bash
+opp_makemake -f --deep -O out -I.
+./DynamicTDMA -f omnetpp.ini -u Cmdenv --sim-time-limit=5s
 bash scripts/run_joint.sh --num_slots 10 --num_nodes 9
+docker build -t dynamic-tdma .
 ```
 
-## Coding Style & Naming Conventions
+手动调试 RL 闭环时优先使用 `scripts/run_joint.sh`，它会处理命名管道和进程清理。
 
-Use C++17 and follow the existing OMNeT++ style: class names in `PascalCase`, methods and variables in `camelCase`, constants or static globals prefixed consistently with nearby code. Keep comments concise and focused on protocol behavior. Python code in `rl/` follows standard PEP 8 naming, with `snake_case` functions and explicit CLI arguments.
+## 编码风格与命名约定
 
-## Testing Guidelines
+C++ 使用 C++17。缩进为 2 个空格，左大括号采用 K&R 风格。变量和函数使用小驼峰，如 `numNodes`、`handleMessage`；宏和常量使用 `UPPER_SNAKE_CASE`；全局或静态变量使用 `s` 或 `g` 前缀。OMNeT++ 日志使用 `EV <<`，类型转换优先使用 `check_and_cast<T*>()`，模块源文件保留 `Define_Module(ClassName);`。Python 文件和函数使用 `snake_case`，复杂张量维度附近保留简短注释。
 
-There is no separate unit test suite. Validate changes with at least a short Cmdenv run and, for RL or pipe changes, a short joint run such as:
+`TDMA_Messages_m.cc` 和 `TDMA_Messages_m.h` 由 `TDMA_Messages.msg` 生成，禁止直接编辑。
+
+## 测试与验证指南
+
+当前没有独立单元测试套件。C++ 或 NED 变更至少执行一次短仿真：
 
 ```bash
-bash scripts/run_joint.sh --target_frames 10 --sim_time 3 --record_eventlog false
+./DynamicTDMA -f omnetpp.ini -u Cmdenv --sim-time-limit=5s
 ```
 
-Check `logs/<run>/python.log`, `logs/<run>/sim.log`, and generated CSVs in `results/`.
+修改 `rl/`、命名管道 JSON 协议或调度逻辑时，还需验证 `rl.rl_receiver` 或 `run_joint.sh`，确认每帧观测完整、PPO 能更新、checkpoint 能写入。
 
-## Commit & Pull Request Guidelines
+## 提交与 Pull Request 规范
 
-Recent commits use concise Chinese summaries, for example `优化仿真运行速度` or `实现动态拓扑扰动仿真入口`. Keep commits focused and describe the behavioral change. Pull requests should include the motivation, key configuration used, validation commands, and notable output files. Mention any changes to `omnetpp.ini`, FIFO paths, checkpoint behavior, or benchmark scripts.
+Git 历史使用简洁中文提交信息，偏动宾结构，例如 `添加 Docker 支持：...`、`逐时隙奖励分解：...`。每次提交聚焦一个逻辑变更。PR 应说明行为变化、列出执行过的验证命令、标注影响的配置项（如 `numDataSlots`、`numNodes`），仿真或训练相关变更请附关键日志片段。
 
-## Configuration Tips
+## 配置与 Agent 注意事项
 
-Ensure `--num_slots` and `--num_nodes` match `omnetpp.ini`. The default FIFO paths are `/tmp/tdma_rl_state` and `/tmp/tdma_rl_action`; clear stale pipes if a run is interrupted.
+保持 `omnetpp.ini` 中 `numDataSlots` 与脚本参数 `--num_slots` 一致，`numNodes` 与 `--num_nodes` 一致，否则状态向量维度会不匹配。不要提交临时日志、大量结果文件或非必要 checkpoint，除非它们是明确的基准实验产物。
 
-## Multi-Server Experiment Coordination
+## 最近工作交接（Claude ↔ Codex）
 
-When working from multiple servers, read `docs/协同实验运行登记.md` before launching any benchmark. Use unique suite and log names that identify the server or task, for example `manet_sensitivity_comm200_server_a` or `formal_appendix_n15_server_b`. Do not overwrite another server's `logs/` directory or rerun a completed suite unless the document explicitly marks it invalid.
+本仓库由 Claude Code 与 Codex 交替推进，并可能由多台服务器异步协作。每次切换 agent 或服务器时，先读最新一份交接文档了解上轮做了什么、当前 git 状态、关键架构决策与下一步建议。最新文档：
 
-Prefer feature branches for parallel work:
+- [docs/最近工作交接-2026-05-10-server-b.md](docs/最近工作交接-2026-05-10-server-b.md)：server-b 正式 MANET v3 结果、协作规则、后续任务建议。
+- [docs/最近工作交接-2026-05-10-server-a.md](docs/最近工作交接-2026-05-10-server-a.md)：server-a paper-inspired baseline、MANET smoke、PPO 400-update 补跑。
+- [docs/最近工作交接-2026-05-10.md](docs/最近工作交接-2026-05-10.md)：Claude 到 Codex 的早期交接。
+
+更早的工作记录在 [docs/算法改进记录.md](docs/算法改进记录.md) 与 [docs/论文指标与性能对比基准.md](docs/论文指标与性能对比基准.md) 中按章节追加。新一轮工作完成、切换 agent 时，请创建新的 `docs/最近工作交接-YYYY-MM-DD.md` 或 `docs/最近工作交接-YYYY-MM-DD-<server>.md`，并在本节顶部加链接。
+
+涉及实验、结果、协作、交接或用户泛称“更新文档”时，默认同时检查并更新：
+
+- [docs/协同实验运行登记.md](docs/协同实验运行登记.md)
+- 最新 `docs/最近工作交接-*.md`
+- [docs/算法改进记录.md](docs/算法改进记录.md)
+- [docs/论文指标与性能对比基准.md](docs/论文指标与性能对比基准.md)（若涉及论文指标或主表口径）
+
+## 多服务器实验协作
+
+代码通过 Git 分支同步，实验大结果通过压缩包或外部文件同步，不要提交大型 `logs/`、`checkpoints/`、`out/`。每台服务器运行实验必须使用唯一 suite 名，并在 `docs/协同实验运行登记.md` 记录 commit、命令、结果目录、完整性检查和论文可用性结论。
+
+优先使用服务器专属分支：
 
 ```bash
 git checkout -b server-a/<task-name>
+git checkout -b server-b/<task-name>
 ```
 
-Record every completed, failed, or intentionally skipped experiment in `docs/协同实验运行登记.md`, including command, log root, scenarios, methods, seeds, and whether the result is suitable for paper claims.
+不要覆盖另一台服务器的 `logs/<suite>`，不要重复跑登记为 `accepted_for_paper` 的正式主表实验，除非登记文档明确标记该批次无效或需要复核。
