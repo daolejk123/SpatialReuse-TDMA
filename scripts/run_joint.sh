@@ -44,7 +44,7 @@
 #   --record_eventlog BOOL 写入临时 ini 的 record-eventlog
 #   --topology_mode MODE 写入临时 ini 的 topologyMode（line/ring/star/grid/clustered/full）
 #   --grid_cols N        grid 拓扑列数
-#   --mac_mode MODE      dynamic_tdma|heuristic_only|plain_tdma|greedy_stdma|traffic_adaptive_tdma（默认 dynamic_tdma）
+#   --mac_mode MODE      dynamic_tdma|heuristic_only|plain_tdma|greedy_stdma|traffic_adaptive_tdma|zmac_like|trama_like|bandit_index_proxy（默认 dynamic_tdma）
 #   --skip_ppo           仅运行 OMNeT++，用于传统/启发式非学习基线
 #   --traffic_rate F     写入 trafficArrivalRate
 #   --enable_ramp_traffic BOOL 写入 enableRampTraffic
@@ -265,8 +265,8 @@ if [ -n "$TOPOLOGY_MODE" ]; then
     esac
 fi
 case "$MAC_MODE" in
-    dynamic_tdma|heuristic_only|plain_tdma|greedy_stdma|traffic_adaptive_tdma) ;;
-    *) error "mac_mode 只能是 dynamic_tdma、heuristic_only、plain_tdma、greedy_stdma 或 traffic_adaptive_tdma，当前: $MAC_MODE"; exit 1 ;;
+    dynamic_tdma|heuristic_only|plain_tdma|greedy_stdma|traffic_adaptive_tdma|zmac_like|trama_like|bandit_index_proxy) ;;
+    *) error "mac_mode 只能是 dynamic_tdma、heuristic_only、plain_tdma、greedy_stdma、traffic_adaptive_tdma、zmac_like、trama_like 或 bandit_index_proxy，当前: $MAC_MODE"; exit 1 ;;
 esac
 if [ -n "$LINK_MODEL" ]; then
     case "$LINK_MODEL" in

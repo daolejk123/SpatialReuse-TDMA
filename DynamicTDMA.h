@@ -292,6 +292,9 @@ protected:
   void schedulePlainTdmaRequests();
   void scheduleGreedyStdmaRequests();          // STDMA 系贪心空间复用基线
   void scheduleTrafficAdaptiveTdmaRequests();  // 流量自适应 TDMA 基线
+  void scheduleZmacLikeRequests();             // Z-MAC 风格 owner/steal 混合基线
+  void scheduleTramaLikeRequests();            // TRAMA 风格二跳确定性选举基线
+  void scheduleBanditIndexProxyRequests();     // 队列/等待/冲突 index 调度基线
   // 计算本节点的两跳邻居集合（不含自己与一跳邻居），用于 STDMA 冲突评分
   std::vector<int> computeTwoHopNeighborIds(
       const std::vector<int> &oneHop) const;
@@ -300,6 +303,9 @@ protected:
   std::vector<int> computeStdmaSlotCosts(
       const std::vector<int> &oneHop,
       const std::vector<int> &twoHop) const;
+  int deterministicElectionScore(int nodeId, int slot) const;
+  bool isLocalElectionWinner(int slot, const std::vector<int> &oneHop,
+                             const std::vector<int> &twoHop) const;
   void runDeepLearningModel(); // (Deprecated)
   void updateOccupancyTable();
   void broadcastPacket(cPacket *pkt);

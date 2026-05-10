@@ -6,7 +6,14 @@
 
 ## 构建、测试与开发命令
 
-每个新终端先激活 OMNeT++ 环境：
+每个新终端先激活 OMNeT++ 环境。server-a 常用路径：
+
+```bash
+source /opt/omnetpp-6.3.0/.venv/bin/activate
+source /opt/omnetpp-6.3.0/setenv -f
+```
+
+server-b 常用路径：
 
 ```bash
 source /home/opp_env/omnetpp-6.3.0/setenv
@@ -15,14 +22,14 @@ source /home/opp_env/omnetpp-6.3.0/setenv
 常用命令：
 
 ```bash
-make                                      # 编译仿真二进制
-opp_makemake -f --deep -O out -I.         # .ned/.msg 或源码布局变化后重建 Makefile
+make -j$(nproc) MODE=release
+opp_makemake -f --deep -O out -I.
 ./DynamicTDMA -f omnetpp.ini -u Cmdenv --sim-time-limit=5s
-./scripts/run_joint.sh --num_slots 10 --num_nodes 9
-docker build -t dynamic-tdma .            # 构建可复现实验环境
+bash scripts/run_joint.sh --num_slots 10 --num_nodes 9
+docker build -t dynamic-tdma .
 ```
 
-手动调试 RL 闭环时顺序不能颠倒：先运行 `python -m rl.ppo_trainer --num_slots 10 --num_nodes 9`，再运行 `./DynamicTDMA -f omnetpp.ini -u Cmdenv`。
+手动调试 RL 闭环时优先使用 `scripts/run_joint.sh`，它会处理命名管道和进程清理。
 
 ## 编码风格与命名约定
 
@@ -46,14 +53,15 @@ Git 历史使用简洁中文提交信息，偏动宾结构，例如 `添加 Dock
 
 ## 配置与 Agent 注意事项
 
-保持 `omnetpp.ini` 中 `numDataSlots` 与脚本参数 `--num_slots` 一致，`numNodes` 与 `--num_nodes` 一致，否则状态向量维度会不匹配。运行训练时优先使用 `scripts/run_joint.sh`，它会处理命名管道和进程清理。不要提交临时日志、大量结果文件或非必要 checkpoint，除非它们是明确的基准实验产物。
+保持 `omnetpp.ini` 中 `numDataSlots` 与脚本参数 `--num_slots` 一致，`numNodes` 与 `--num_nodes` 一致，否则状态向量维度会不匹配。不要提交临时日志、大量结果文件或非必要 checkpoint，除非它们是明确的基准实验产物。
 
-## 最近工作交接（Claude ↔ codex）
+## 最近工作交接（Claude ↔ Codex）
 
-本仓库由 Claude Code 与 codex 交替推进，并可能由多台服务器异步协作。每次切换 agent 或服务器时，先读最新一份交接文档了解上轮做了什么、当前 git 状态、关键架构决策与下一步建议。最新文档：
+本仓库由 Claude Code 与 Codex 交替推进，并可能由多台服务器异步协作。每次切换 agent 或服务器时，先读最新一份交接文档了解上轮做了什么、当前 git 状态、关键架构决策与下一步建议。最新文档：
 
-- [docs/最近工作交接-2026-05-10-server-b.md](docs/最近工作交接-2026-05-10-server-b.md)（给另一台服务器 Codex；含正式 MANET v3 结果、协作规则、后续任务建议）
-- [docs/最近工作交接-2026-05-10.md](docs/最近工作交接-2026-05-10.md)（Claude → codex；含 STDMA-inspired 基线 + MANET 化重构两轮工作的交接）
+- [docs/最近工作交接-2026-05-10-server-b.md](docs/最近工作交接-2026-05-10-server-b.md)：server-b 正式 MANET v3 结果、协作规则、后续任务建议。
+- [docs/最近工作交接-2026-05-10-server-a.md](docs/最近工作交接-2026-05-10-server-a.md)：server-a paper-inspired baseline、MANET smoke、PPO 400-update 补跑。
+- [docs/最近工作交接-2026-05-10.md](docs/最近工作交接-2026-05-10.md)：Claude 到 Codex 的早期交接。
 
 更早的工作记录在 [docs/算法改进记录.md](docs/算法改进记录.md) 与 [docs/论文指标与性能对比基准.md](docs/论文指标与性能对比基准.md) 中按章节追加。新一轮工作完成、切换 agent 时，请创建新的 `docs/最近工作交接-YYYY-MM-DD.md` 或 `docs/最近工作交接-YYYY-MM-DD-<server>.md`，并在本节顶部加链接。
 
@@ -64,6 +72,17 @@ Git 历史使用简洁中文提交信息，偏动宾结构，例如 `添加 Dock
 - [docs/算法改进记录.md](docs/算法改进记录.md)
 - [docs/论文指标与性能对比基准.md](docs/论文指标与性能对比基准.md)（若涉及论文指标或主表口径）
 
-多服务器协作时，代码通过 Git 分支同步，实验大结果通过压缩包或外部文件同步，不要提交大型 `logs/`、`checkpoints/`、`out/`。每台服务器运行实验必须使用唯一 suite 名，并在 `docs/协同实验运行登记.md` 记录 commit、命令、结果目录、完整性检查和论文可用性结论。
+## 多服务器实验协作
+
+代码通过 Git 分支同步，实验大结果通过压缩包或外部文件同步，不要提交大型 `logs/`、`checkpoints/`、`out/`。每台服务器运行实验必须使用唯一 suite 名，并在 `docs/协同实验运行登记.md` 记录 commit、命令、结果目录、完整性检查和论文可用性结论。
+
+优先使用服务器专属分支：
+
+```bash
+git checkout -b server-a/<task-name>
+git checkout -b server-b/<task-name>
+```
+
+不要覆盖另一台服务器的 `logs/<suite>`，不要重复跑登记为 `accepted_for_paper` 的正式主表实验，除非登记文档明确标记该批次无效或需要复核。
 
 当用户讨论多服务器协同、跨服务器同步、让另一台 Codex/Claude 继续推进、或询问“给另一台服务器怎么说”时，默认准备一段可直接转发给另一台 agent 的指令块。指令块应包含：当前已确认的 remote/branch/commit、需要执行的 `git fetch`/`pull`/`checkout` 命令、必须阅读的文档、不要重复运行的实验目录、推荐分支名和唯一 suite 名、完成后需要更新的交接文档与 `docs/协同实验运行登记.md`。若另一台服务器已有本地改动，优先要求其新建 `server-a/<task>` 或 `server-b/<task>` 分支提交，不要直接覆盖 `master`。

@@ -9,6 +9,7 @@
 #include <memory>
 #include <system_error>
 #include <cctype>
+#include <cstdint>
 #include <cmath>
 #include <set>
 #include <utility>
@@ -275,7 +276,8 @@ void DynamicTDMA::initialize() {
   }
   if (macMode != "dynamic_tdma" && macMode != "heuristic_only" &&
       macMode != "plain_tdma" && macMode != "greedy_stdma" &&
-      macMode != "traffic_adaptive_tdma") {
+      macMode != "traffic_adaptive_tdma" && macMode != "zmac_like" &&
+      macMode != "trama_like" && macMode != "bandit_index_proxy") {
     EV << "Unknown macMode=" << macMode
        << ", fallback to dynamic_tdma" << endl;
     macMode = "dynamic_tdma";
@@ -1919,6 +1921,18 @@ void DynamicTDMA::scheduleRequests() {
     scheduleTrafficAdaptiveTdmaRequests();
     return;
   }
+  if (macMode == "zmac_like") {
+    scheduleZmacLikeRequests();
+    return;
+  }
+  if (macMode == "trama_like") {
+    scheduleTramaLikeRequests();
+    return;
+  }
+  if (macMode == "bandit_index_proxy") {
+    scheduleBanditIndexProxyRequests();
+    return;
+  }
 
   // 挑选要申请时隙的包（最多 numDataSlots 个）
   // 简单策略：遍历队列，取出高优先级，再取低优先级
@@ -2096,6 +2110,37 @@ std::vector<int> DynamicTDMA::computeStdmaSlotCosts(
   return cost;
 }
 
+int DynamicTDMA::deterministicElectionScore(int nodeId, int slot) const {
+  uint64_t x = 1469598103934665603ULL;
+  x ^= (uint64_t)(nodeId + 1) * 1099511628211ULL;
+  x ^= (uint64_t)(slot + 17) * 1402946736689701973ULL;
+  x ^= (uint64_t)(frameCounter + 31) * 1609587929392839161ULL;
+  x ^= (x >> 33);
+  x *= 0xff51afd7ed558ccdULL;
+  x ^= (x >> 33);
+  return (int)(x & 0x7fffffff);
+}
+
+bool DynamicTDMA::isLocalElectionWinner(
+    int slot, const std::vector<int> &oneHop,
+    const std::vector<int> &twoHop) const {
+  int bestNode = myId;
+  int bestScore = deterministicElectionScore(myId, slot);
+  std::vector<int> candidates;
+  candidates.insert(candidates.end(), oneHop.begin(), oneHop.end());
+  candidates.insert(candidates.end(), twoHop.begin(), twoHop.end());
+  for (int node : candidates) {
+    if (!isNodeActive(node))
+      continue;
+    int score = deterministicElectionScore(node, slot);
+    if (score > bestScore || (score == bestScore && node < bestNode)) {
+      bestScore = score;
+      bestNode = node;
+    }
+  }
+  return bestNode == myId;
+}
+
 void DynamicTDMA::scheduleGreedyStdmaRequests() {
   // 1. 选包：先高优先级，再普通优先级，最多 numDataSlots 个
   std::vector<size_t> selectedIndices;
@@ -2268,6 +2313,198 @@ void DynamicTDMA::scheduleTrafficAdaptiveTdmaRequests() {
       myDesiredTargets[slot] = -1;
     }
     extraUsed++;
+  }
+  totalSlotRequestCount += requestedThisFrame;
+}
+
+void DynamicTDMA::scheduleZmacLikeRequests() {
+  if (numDataSlots <= 0)
+    return;
+
+  int ownerSlot = myId % numDataSlots;
+  size_t ownerPickIdx = 0;
+  for (size_t i = 1; i < packetQueue.size(); i++) {
+    if (packetQueue[i].priority > packetQueue[ownerPickIdx].priority)
+      ownerPickIdx = i;
+  }
+
+  const PendingPacket &ownerPkt = packetQueue[ownerPickIdx];
+  double ownerWait = (simTime() - ownerPkt.genTime).dbl();
+  double ownerBase = (ownerPkt.priority >= 1) ? 0.8 : 0.4;
+  double ownerPrio = std::min(0.99, ownerBase + ownerWait * 0.1);
+
+  myDesiredTargets[ownerSlot] = ownerPkt.destId;
+  myPriorities[ownerSlot] = ownerPrio;
+  myHeurProbs[ownerSlot] = 1.0;
+  reqCandidateCount++;
+  reqSentCount++;
+  reqProbSum += 1.0;
+  long long requestedThisFrame = 1;
+
+  int recentCollisions = 0;
+  for (int v : collHist)
+    recentCollisions += v;
+  bool highContention = ((int)packetQueue.size() >= highLoadThreshold) ||
+                        (recentCollisions >= collisionHighWatermark);
+  if (highContention || packetQueue.size() <= 1) {
+    totalSlotRequestCount += requestedThisFrame;
+    EV << "ZmacLike: Node " << myId << " high-contention owner Slot "
+       << ownerSlot << endl;
+    return;
+  }
+
+  std::vector<int> oneHop = getOneHopNeighborIds();
+  std::vector<int> twoHop = computeTwoHopNeighborIds(oneHop);
+  std::vector<int> cost = computeStdmaSlotCosts(oneHop, twoHop);
+  std::vector<int> slotOrder = SlotSelection::buildSlotOrder(
+      numDataSlots, std::vector<bool>(numDataSlots, false),
+      [this](int lo, int hi) { return intuniform(lo, hi); });
+  std::stable_sort(slotOrder.begin(), slotOrder.end(),
+                   [&cost](int a, int b) { return cost[a] < cost[b]; });
+
+  int stealBudget = (int)std::min<size_t>(
+      packetQueue.size() - 1, std::max(1, numDataSlots / 3));
+  int used = 0;
+  for (int slot : slotOrder) {
+    if (used >= stealBudget)
+      break;
+    if (slot == ownerSlot || slot < 0 || slot >= numDataSlots)
+      continue;
+    if (cost[slot] >= 100)
+      continue;
+
+    size_t qIdx = (size_t)used;
+    if (qIdx >= ownerPickIdx)
+      qIdx++;
+    if (qIdx >= packetQueue.size())
+      break;
+
+    const PendingPacket &pkt = packetQueue[qIdx];
+    double waitTime = (simTime() - pkt.genTime).dbl();
+    double basePrio = (pkt.priority >= 1) ? 0.8 : 0.4;
+    double dynamicPrio = std::min(0.99, basePrio + waitTime * 0.1);
+    double stealProb = (cost[slot] == 0) ? 0.5 : 0.25;
+    stealProb = std::min(0.9, stealProb + 0.05 * waitTime);
+
+    myDesiredTargets[slot] = pkt.destId;
+    myHeurProbs[slot] = stealProb;
+    reqCandidateCount++;
+    reqProbSum += stealProb;
+    if (uniform(0, 1) < stealProb) {
+      myPriorities[slot] = dynamicPrio * 0.8;
+      reqSentCount++;
+      requestedThisFrame++;
+      EV << "ZmacLike: Node " << myId << " stealing Slot " << slot
+         << " (cost=" << cost[slot] << ", Prob=" << stealProb << ")"
+         << endl;
+    } else {
+      myDesiredTargets[slot] = -1;
+      myPriorities[slot] = 0.0;
+    }
+    used++;
+  }
+  totalSlotRequestCount += requestedThisFrame;
+}
+
+void DynamicTDMA::scheduleTramaLikeRequests() {
+  std::vector<int> oneHop = getOneHopNeighborIds();
+  std::vector<int> twoHop = computeTwoHopNeighborIds(oneHop);
+  std::vector<int> cost = computeStdmaSlotCosts(oneHop, twoHop);
+
+  std::vector<int> electedSlots;
+  for (int slot = 0; slot < numDataSlots; slot++) {
+    if (isLocalElectionWinner(slot, oneHop, twoHop))
+      electedSlots.push_back(slot);
+  }
+  if (electedSlots.empty())
+    return;
+
+  std::stable_sort(electedSlots.begin(), electedSlots.end(),
+                   [&cost](int a, int b) { return cost[a] < cost[b]; });
+
+  long long requestedThisFrame = 0;
+  size_t qIdx = 0;
+  for (int slot : electedSlots) {
+    if (qIdx >= packetQueue.size())
+      break;
+    const PendingPacket &pkt = packetQueue[qIdx++];
+    double waitTime = (simTime() - pkt.genTime).dbl();
+    double basePrio = (pkt.priority >= 1) ? 0.8 : 0.4;
+    double dynamicPrio = std::min(0.99, basePrio + waitTime * 0.1);
+
+    myDesiredTargets[slot] = pkt.destId;
+    myPriorities[slot] = dynamicPrio;
+    myHeurProbs[slot] = 1.0;
+    reqCandidateCount++;
+    reqSentCount++;
+    reqProbSum += 1.0;
+    requestedThisFrame++;
+    EV << "TramaLike: Node " << myId << " elected for Slot " << slot
+       << " (cost=" << cost[slot] << ")" << endl;
+  }
+  totalSlotRequestCount += requestedThisFrame;
+}
+
+void DynamicTDMA::scheduleBanditIndexProxyRequests() {
+  std::vector<int> oneHop = getOneHopNeighborIds();
+  std::vector<int> twoHop = computeTwoHopNeighborIds(oneHop);
+  std::vector<int> cost = computeStdmaSlotCosts(oneHop, twoHop);
+
+  double queuePressure = highLoadThreshold > 0
+                             ? std::min(1.0, (double)packetQueue.size() /
+                                                  (double)highLoadThreshold)
+                             : 1.0;
+  int budget = std::min<int>(
+      numDataSlots, std::max(1, 1 + (int)std::ceil(queuePressure * 3.0)));
+  budget = std::min<int>(budget, (int)packetQueue.size());
+
+  struct SlotScore {
+    int slot;
+    double score;
+  };
+  std::vector<SlotScore> scores;
+  for (int slot = 0; slot < numDataSlots; slot++) {
+    double risk = (cost[slot] >= 100) ? 4.0 : (double)cost[slot] * 0.08;
+    double retryPenalty =
+        (slot < (int)avoidSlotsNextSchedule.size() && avoidSlotsNextSchedule[slot])
+            ? 1.0
+            : 0.0;
+    double ownerBonus = (slot == myId % numDataSlots) ? 0.4 : 0.0;
+    double index = queuePressure * 2.0 + ownerBonus - risk - retryPenalty;
+    scores.push_back({slot, index});
+  }
+  if ((int)avoidSlotsNextSchedule.size() == numDataSlots) {
+    std::fill(avoidSlotsNextSchedule.begin(), avoidSlotsNextSchedule.end(), false);
+  }
+  std::stable_sort(scores.begin(), scores.end(),
+                   [](const SlotScore &a, const SlotScore &b) {
+                     return a.score > b.score;
+                   });
+
+  long long requestedThisFrame = 0;
+  for (int i = 0; i < budget && i < (int)scores.size(); i++) {
+    int slot = scores[i].slot;
+    const PendingPacket &pkt = packetQueue[(size_t)i];
+    double waitTime = (simTime() - pkt.genTime).dbl();
+    double basePrio = (pkt.priority >= 1) ? 0.8 : 0.4;
+    double urgency = std::min(0.99, basePrio + waitTime * 0.1);
+    double reqProb = std::max(0.15, std::min(1.0, 0.55 + scores[i].score * 0.2));
+
+    myDesiredTargets[slot] = pkt.destId;
+    myHeurProbs[slot] = reqProb;
+    reqCandidateCount++;
+    reqProbSum += reqProb;
+    if (uniform(0, 1) < reqProb) {
+      myPriorities[slot] = urgency;
+      reqSentCount++;
+      requestedThisFrame++;
+      EV << "BanditIndexProxy: Node " << myId << " requesting Slot " << slot
+         << " (index=" << scores[i].score << ", Prob=" << reqProb << ")"
+         << endl;
+    } else {
+      myDesiredTargets[slot] = -1;
+      myPriorities[slot] = 0.0;
+    }
   }
   totalSlotRequestCount += requestedThisFrame;
 }
