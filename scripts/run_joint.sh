@@ -26,6 +26,9 @@
 #   --bc_lr F            BC 预训练学习率（默认 1e-3）
 #   --heur_deviation_coef F  方向B 软正则系数（默认 0=禁用，建议 0.005~0.02）
 #   --idle_queue_penalty F   有队列但未申请时隙的惩罚（默认 0=禁用，建议 0.05）
+#   --starvation_penalty_coef F  饥饿惩罚系数（默认 0=禁用，建议 0.1）
+#   --starvation_threshold N     饥饿启动阈值帧数（默认 5）
+#   --starvation_penalty_max_frames N  饥饿惩罚封顶帧数（默认 20）
 #   --save_every N       每 N 帧保存一次 checkpoint（默认使用训练器默认值）
 #   --target_updates N   达到 N 次 PPO 更新后正常停止（默认 0=禁用）
 #   --target_frames N    达到 N 帧后正常停止（默认 0=禁用）
@@ -182,6 +185,9 @@ while [[ $# -gt 0 ]]; do
         --bc_lr)        BC_LR="$2";      shift 2 ;;
         --heur_deviation_coef) HEUR_DEVIATION_COEF="$2"; shift 2 ;;
         --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
+        --starvation_penalty_coef) STARVATION_PENALTY_COEF="$2"; shift 2 ;;
+        --starvation_threshold) STARVATION_THRESHOLD="$2"; shift 2 ;;
+        --starvation_penalty_max_frames) STARVATION_PENALTY_MAX_FRAMES="$2"; shift 2 ;;
         --save_every)   SAVE_EVERY="$2"; shift 2 ;;
         --target_updates) TARGET_UPDATES="$2"; shift 2 ;;
         --target_frames) TARGET_FRAMES="$2"; shift 2 ;;
@@ -384,6 +390,9 @@ fi
 [ -n "$RECEIVER_BUFFER_SIZE" ] && info "receiver_buffer_size = $RECEIVER_BUFFER_SIZE"
 info "stale_timeout = ${STALE_TIMEOUT}s"
 [ -n "$IDLE_QUEUE_PENALTY" ] && info "idle_queue_penalty = $IDLE_QUEUE_PENALTY"
+[ -n "$STARVATION_PENALTY_COEF" ] && info "starvation_penalty_coef = $STARVATION_PENALTY_COEF"
+[ -n "$STARVATION_THRESHOLD" ] && info "starvation_threshold = $STARVATION_THRESHOLD"
+[ -n "$STARVATION_PENALTY_MAX_FRAMES" ] && info "starvation_penalty_max_frames = $STARVATION_PENALTY_MAX_FRAMES"
 
 if [ "$SYNC_INTERVAL" -gt 0 ] 2>/dev/null; then
     warn "同步模式已开启（sync_interval=$SYNC_INTERVAL），仿真速度将受 Python 推理速度限制"
@@ -700,6 +709,9 @@ PPO_CMD=(
 [ -n "$BC_LR" ]         && PPO_CMD+=(--bc_lr          "$BC_LR")
 [ -n "$HEUR_DEVIATION_COEF" ] && PPO_CMD+=(--heur_deviation_coef "$HEUR_DEVIATION_COEF")
 [ -n "$IDLE_QUEUE_PENALTY" ] && PPO_CMD+=(--idle_queue_penalty "$IDLE_QUEUE_PENALTY")
+[ -n "$STARVATION_PENALTY_COEF" ] && PPO_CMD+=(--starvation_penalty_coef "$STARVATION_PENALTY_COEF")
+[ -n "$STARVATION_THRESHOLD" ] && PPO_CMD+=(--starvation_threshold "$STARVATION_THRESHOLD")
+[ -n "$STARVATION_PENALTY_MAX_FRAMES" ] && PPO_CMD+=(--starvation_penalty_max_frames "$STARVATION_PENALTY_MAX_FRAMES")
 [ -n "$SAVE_EVERY" ]     && PPO_CMD+=(--save_every     "$SAVE_EVERY")
 [ -n "$TARGET_UPDATES" ] && PPO_CMD+=(--target_updates "$TARGET_UPDATES")
 [ -n "$TARGET_FRAMES" ]  && PPO_CMD+=(--target_frames  "$TARGET_FRAMES")

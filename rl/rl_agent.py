@@ -349,6 +349,10 @@ def compute_per_slot_reward(
     obs: NodeObservation,
     num_slots: int,
     idle_queue_penalty: float = 0.0,
+    frames_since_tx: int = 0,
+    starvation_threshold: int = 0,
+    starvation_penalty_coef: float = 0.0,
+    starvation_penalty_max_frames: int = 20,
 ) -> torch.Tensor:
     """
     逐时隙奖励分解：为每个时隙独立计算奖励，解决聚合奖励的信用分配问题。
@@ -361,19 +365,46 @@ def compute_per_slot_reward(
     当 idle_queue_penalty > 0 且本节点队列非空时，对未申请时隙施加轻微惩罚，
     避免策略通过“有包不发”获得过于保守的高 reward。
 
+    饥饿惩罚（starvation_penalty_coef > 0 时启用）：
+      连续 frames_since_tx 帧未成功发包后，对'0'时隙额外施加惩罚。
+      penalty = coef × min(1.0, max(0, fst - threshold) / max_frames)
+      达到 (threshold + max_frames) 帧时惩罚封顶为 coef。
+      只在节点队列非空（obs.Qt > 0）时启用，避免空队列被冤枉惩罚。
+
     Returns
     -------
     torch.Tensor  shape (M,)  逐时隙奖励向量
     """
     rewards = torch.zeros(num_slots, dtype=torch.float32)
     sr = obs.SlotResult
+
+    # 饥饿惩罚：仅在队列非空且超过阈值时生效
+    starv_pen = 0.0
+    if (
+        starvation_penalty_coef > 0.0
+        and starvation_threshold > 0
+        and starvation_penalty_max_frames > 0
+        and obs.Qt > 0
+        and frames_since_tx > starvation_threshold
+    ):
+        excess_norm = min(
+            1.0,
+            (frames_since_tx - starvation_threshold) / starvation_penalty_max_frames,
+        )
+        starv_pen = starvation_penalty_coef * excess_norm
+
     for s in range(min(num_slots, len(sr))):
         if sr[s] == '1':
             rewards[s] = 1.0    # 申请且成功
         elif sr[s] == '2':
             rewards[s] = -1.0   # 申请但失败（碰撞或拒绝）
-        elif sr[s] == '0' and idle_queue_penalty > 0 and obs.Qt > 0:
-            rewards[s] = -idle_queue_penalty
+        elif sr[s] == '0':
+            pen = 0.0
+            if idle_queue_penalty > 0 and obs.Qt > 0:
+                pen += idle_queue_penalty
+            pen += starv_pen
+            if pen > 0:
+                rewards[s] = -pen
         # '0' = 未申请且无队列 → 0.0（默认值）
     return rewards
 

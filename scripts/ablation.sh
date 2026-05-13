@@ -36,6 +36,9 @@ NUM_SLOTS=10
 NUM_NODES=9
 HEUR_COEF="0.01"
 IDLE_QUEUE_PENALTY=""
+STARVATION_PENALTY_COEF=""
+STARVATION_THRESHOLD=""
+STARVATION_PENALTY_MAX_FRAMES=""
 METRICS_MODE="full"
 METRICS_FLUSH_EVERY="200"
 SIM_LOG_MODE="file"
@@ -71,6 +74,9 @@ while [[ $# -gt 0 ]]; do
         --num_nodes)  NUM_NODES="$2";  shift 2 ;;
         --heur_coef)  HEUR_COEF="$2";  shift 2 ;;
         --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
+        --starvation_penalty_coef) STARVATION_PENALTY_COEF="$2"; shift 2 ;;
+        --starvation_threshold) STARVATION_THRESHOLD="$2"; shift 2 ;;
+        --starvation_penalty_max_frames) STARVATION_PENALTY_MAX_FRAMES="$2"; shift 2 ;;
         --topology_mode) TOPOLOGY_MODE="$2"; shift 2 ;;
         --grid_cols) GRID_COLS="$2"; shift 2 ;;
         --traffic_rate) TRAFFIC_RATE="$2"; shift 2 ;;
@@ -243,6 +249,10 @@ run_one() {
     local T0=$(date +%s)
     local IDLE_ARGS=()
     [ -n "$IDLE_QUEUE_PENALTY" ] && IDLE_ARGS=(--idle_queue_penalty "$IDLE_QUEUE_PENALTY")
+    local STARVATION_ARGS=()
+    [ -n "$STARVATION_PENALTY_COEF" ] && STARVATION_ARGS+=(--starvation_penalty_coef "$STARVATION_PENALTY_COEF")
+    [ -n "$STARVATION_THRESHOLD" ] && STARVATION_ARGS+=(--starvation_threshold "$STARVATION_THRESHOLD")
+    [ -n "$STARVATION_PENALTY_MAX_FRAMES" ] && STARVATION_ARGS+=(--starvation_penalty_max_frames "$STARVATION_PENALTY_MAX_FRAMES")
     local SAVE_ARGS=()
     [ -n "$SAVE_EVERY" ] && SAVE_ARGS=(--save_every "$SAVE_EVERY")
     local TARGET_ARGS=()
@@ -297,6 +307,7 @@ run_one() {
         "${MOBILITY_ARGS[@]}" \
         --heur_deviation_coef "$HDEV" \
         "${IDLE_ARGS[@]}" \
+        "${STARVATION_ARGS[@]}" \
         "${SAVE_ARGS[@]}" \
         "${TARGET_ARGS[@]}" \
         --stale_timeout "$STALE_TIMEOUT" \

@@ -67,6 +67,12 @@ class PPOConfig:
     # 有队列但未申请的轻量惩罚，0.0 = 禁用（保持旧 reward 完全一致）
     idle_queue_penalty: float = 0.0
 
+    # 饥饿惩罚（改进 19，2026-05-10）：连续 N 帧未发包后对'0'时隙施加递增惩罚
+    # 0.0 = 禁用；正常使用 0.05~0.20，太大会让策略无脑申请导致碰撞激增
+    starvation_threshold:           int   = 5     # 超过 N 帧未发包才开始惩罚
+    starvation_penalty_coef:        float = 0.0   # 0.0 默认禁用；启用时建议 0.1
+    starvation_penalty_max_frames:  int   = 20    # 封顶：fst-threshold 超过该值后惩罚饱和
+
     # 训练节奏
     update_every: int   = 128      # 每 K 帧执行一次 PPO 更新
     ppo_epochs:   int   = 4        # 每次更新的梯度步数
@@ -486,6 +492,8 @@ def train(cfg: PPOConfig):
     # 奖励重塑：逐时隙 EWMA 基线，差分奖励减小方差
     reward_baselines: Dict[int, torch.Tensor] = {}  # nid → (M,)
     _ewma_alpha = 0.05  # EWMA 更新步长（对应衰减 0.95）
+    # 饥饿计数：每节点连续未成功发包帧数（队列非空时增长，成功或队列空时归零）
+    frames_since_tx: Dict[int, int] = collections.defaultdict(int)
     # 奖励延迟对齐：帧 t 的奖励（Nsucc/Ncoll）反映帧 t-1 的 RL 动作结果
     # 因此帧 t 的 transition 需等帧 t+1 的奖励来完成
     pending_transitions: Dict[int, NodeTransition] = {}
@@ -561,14 +569,25 @@ def train(cfg: PPOConfig):
                 )
 
                 # ── 3. 计算逐时隙奖励（本帧 SlotResult 反映上一帧动作的结果）
-                node_rewards: Dict[int, torch.Tensor] = {
-                    nid: compute_per_slot_reward(
+                # 饥饿惩罚：使用进入本帧前的 fst 值计算，再根据本帧成功/队列状态更新计数
+                node_rewards: Dict[int, torch.Tensor] = {}
+                for nid, obs in frame_obs.nodes.items():
+                    fst_pre = frames_since_tx[nid]
+                    node_rewards[nid] = compute_per_slot_reward(
                         obs,
                         cfg.num_slots,
                         idle_queue_penalty=cfg.idle_queue_penalty,
+                        frames_since_tx=fst_pre,
+                        starvation_threshold=cfg.starvation_threshold,
+                        starvation_penalty_coef=cfg.starvation_penalty_coef,
+                        starvation_penalty_max_frames=cfg.starvation_penalty_max_frames,
                     )
-                    for nid, obs in frame_obs.nodes.items()
-                }
+                    # 更新计数器：本帧成功（SlotResult 中存在 '1'）或队列为空 → 归零
+                    sr = obs.SlotResult[:cfg.num_slots]
+                    if '1' in sr or obs.Qt == 0:
+                        frames_since_tx[nid] = 0
+                    else:
+                        frames_since_tx[nid] = fst_pre + 1
 
                 # ── 4a. 用本帧奖励完成上一帧的 pending transition ────
                 # 帧 t 的 SlotResult 反映帧 t-1 的 RL 动作结果
@@ -750,6 +769,12 @@ def _parse_args() -> PPOConfig:
                    help="方向B: α 偏离 0.5 的软正则系数（0=禁用，建议 0.005~0.02）")
     p.add_argument("--idle_queue_penalty", type=float, default=0.0,
                    help="有队列但未申请时隙的轻量惩罚（0=禁用，建议 0.05）")
+    p.add_argument("--starvation_threshold", type=int, default=5,
+                   help="饥饿惩罚启动阈值：超过 N 帧未成功发包后开始惩罚（默认 5）")
+    p.add_argument("--starvation_penalty_coef", type=float, default=0.0,
+                   help="饥饿惩罚系数（0=禁用，建议 0.05~0.20）；coef×normalized_excess 加到 '0' 时隙")
+    p.add_argument("--starvation_penalty_max_frames", type=int, default=20,
+                   help="饥饿惩罚封顶：fst-threshold 超过该值后惩罚饱和为 coef（默认 20）")
     p.add_argument("--bc_frames",  type=int,   default=0,
                    help="行为克隆预训练帧数（0=跳过BC，直接RL训练）")
     p.add_argument("--bc_lr",      type=float, default=1e-3,

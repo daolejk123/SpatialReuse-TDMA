@@ -54,6 +54,9 @@ while [[ $# -gt 0 ]]; do
         --num_slots) NUM_SLOTS="$2"; shift 2 ;;
         --heur_coef) HEUR_COEF="$2"; shift 2 ;;
         --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
+        --starvation_penalty_coef) STARVATION_PENALTY_COEF="$2"; shift 2 ;;
+        --starvation_threshold) STARVATION_THRESHOLD="$2"; shift 2 ;;
+        --starvation_penalty_max_frames) STARVATION_PENALTY_MAX_FRAMES="$2"; shift 2 ;;
         --metrics_mode) METRICS_MODE="$2"; shift 2 ;;
         --metrics_flush_every) METRICS_FLUSH_EVERY="$2"; shift 2 ;;
         --sim_log_mode) SIM_LOG_MODE="$2"; shift 2 ;;
@@ -246,6 +249,9 @@ printf 'scenario\tmethod\tseed\tlog_dir\timplementation\tnetwork\trunner\tmacMod
     printf 'num_slots\t%s\n' "$NUM_SLOTS"
     printf 'heur_coef\t%s\n' "$HEUR_COEF"
     printf 'idle_queue_penalty\t%s\n' "$IDLE_QUEUE_PENALTY"
+    printf 'starvation_penalty_coef\t%s\n' "$STARVATION_PENALTY_COEF"
+    printf 'starvation_threshold\t%s\n' "$STARVATION_THRESHOLD"
+    printf 'starvation_penalty_max_frames\t%s\n' "$STARVATION_PENALTY_MAX_FRAMES"
     printf 'metrics_mode\t%s\n' "$METRICS_MODE"
     printf 'metrics_flush_every\t%s\n' "$METRICS_FLUSH_EVERY"
     printf 'sim_log_mode\t%s\n' "$SIM_LOG_MODE"
@@ -312,6 +318,9 @@ for scenario in $SCENARIOS; do
                 [ -n "$TARGET_UPDATES" ] && args+=(--target_updates "$TARGET_UPDATES")
                 [ -n "$TARGET_FRAMES" ] && args+=(--target_frames "$TARGET_FRAMES")
                 [ -n "$IDLE_QUEUE_PENALTY" ] && args+=(--idle_queue_penalty "$IDLE_QUEUE_PENALTY")
+                [ -n "$STARVATION_PENALTY_COEF" ] && args+=(--starvation_penalty_coef "$STARVATION_PENALTY_COEF")
+                [ -n "$STARVATION_THRESHOLD" ] && args+=(--starvation_threshold "$STARVATION_THRESHOLD")
+                [ -n "$STARVATION_PENALTY_MAX_FRAMES" ] && args+=(--starvation_penalty_max_frames "$STARVATION_PENALTY_MAX_FRAMES")
                 [ "$DRY_RUN" = true ] && args+=(--dry_run)
 
                 info "运行: scenario=$scenario method=$method implementation=$METHOD_IMPLEMENTATION network=$METHOD_NETWORK runner=ablation macMode=$METHOD_MAC_MODE adapter=$METHOD_ADAPTER"
