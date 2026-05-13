@@ -291,6 +291,7 @@ protected:
   void scheduleRequests();     // 智能调度 (替代 runDeepLearningModel)
   void schedulePlainTdmaRequests();
   void scheduleGreedyStdmaRequests();          // STDMA 系贪心空间复用基线
+  void scheduleGreedyStdma2HopRequests();      // 严格两跳安全 STDMA 贪心基线
   void scheduleTrafficAdaptiveTdmaRequests();  // 流量自适应 TDMA 基线
   void scheduleZmacLikeRequests();             // Z-MAC 风格 owner/steal 混合基线
   void scheduleTramaLikeRequests();            // TRAMA 风格二跳确定性选举基线

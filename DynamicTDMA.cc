@@ -276,8 +276,10 @@ void DynamicTDMA::initialize() {
   }
   if (macMode != "dynamic_tdma" && macMode != "heuristic_only" &&
       macMode != "plain_tdma" && macMode != "greedy_stdma" &&
+      macMode != "greedy_stdma_2hop" &&
       macMode != "traffic_adaptive_tdma" && macMode != "zmac_like" &&
-      macMode != "trama_like" && macMode != "bandit_index_proxy") {
+      macMode != "zmac_inspired" && macMode != "trama_like" &&
+      macMode != "trama_inspired" && macMode != "bandit_index_proxy") {
     EV << "Unknown macMode=" << macMode
        << ", fallback to dynamic_tdma" << endl;
     macMode = "dynamic_tdma";
@@ -1917,15 +1919,19 @@ void DynamicTDMA::scheduleRequests() {
     scheduleGreedyStdmaRequests();
     return;
   }
+  if (macMode == "greedy_stdma_2hop") {
+    scheduleGreedyStdma2HopRequests();
+    return;
+  }
   if (macMode == "traffic_adaptive_tdma") {
     scheduleTrafficAdaptiveTdmaRequests();
     return;
   }
-  if (macMode == "zmac_like") {
+  if (macMode == "zmac_like" || macMode == "zmac_inspired") {
     scheduleZmacLikeRequests();
     return;
   }
-  if (macMode == "trama_like") {
+  if (macMode == "trama_like" || macMode == "trama_inspired") {
     scheduleTramaLikeRequests();
     return;
   }
@@ -2207,6 +2213,72 @@ void DynamicTDMA::scheduleGreedyStdmaRequests() {
       myPriorities[slot] = 0.0;
       myDesiredTargets[slot] = -1;
     }
+  }
+  totalSlotRequestCount += requestedThisFrame;
+}
+
+void DynamicTDMA::scheduleGreedyStdma2HopRequests() {
+  // 严格两跳安全版本：只使用上一帧观测中未被一跳/两跳邻居占用的 slot。
+  // 这是 STDMA 文献中 two-hop conflict graph 的保守贪心近似，不是离线最优求解。
+  std::vector<size_t> selectedIndices;
+  for (size_t i = 0; i < packetQueue.size(); i++) {
+    if ((int)selectedIndices.size() >= numDataSlots)
+      break;
+    if (packetQueue[i].priority >= 1)
+      selectedIndices.push_back(i);
+  }
+  for (size_t i = 0; i < packetQueue.size(); i++) {
+    if ((int)selectedIndices.size() >= numDataSlots)
+      break;
+    bool already = false;
+    for (size_t idx : selectedIndices) {
+      if (idx == i) {
+        already = true;
+        break;
+      }
+    }
+    if (!already)
+      selectedIndices.push_back(i);
+  }
+  if (selectedIndices.empty())
+    return;
+
+  std::vector<int> oneHop = getOneHopNeighborIds();
+  std::vector<int> twoHop = computeTwoHopNeighborIds(oneHop);
+  std::vector<int> cost = computeStdmaSlotCosts(oneHop, twoHop);
+
+  std::vector<int> slotOrder = SlotSelection::buildSlotOrder(
+      numDataSlots, std::vector<bool>(numDataSlots, false),
+      [this](int lo, int hi) { return intuniform(lo, hi); });
+  std::stable_sort(slotOrder.begin(), slotOrder.end(),
+                   [&cost](int a, int b) { return cost[a] < cost[b]; });
+
+  long long requestedThisFrame = 0;
+  size_t pick = 0;
+  for (int slot : slotOrder) {
+    if (pick >= selectedIndices.size())
+      break;
+    if (slot < 0 || slot >= numDataSlots)
+      continue;
+    if (cost[slot] >= 10)
+      continue; // one-hop/two-hop occupied slots are unsafe for STDMA reuse.
+
+    const PendingPacket &pkt = packetQueue[selectedIndices[pick++]];
+    double waitTime = (simTime() - pkt.genTime).dbl();
+    double basePrio = (pkt.priority >= 1) ? 0.8 : 0.4;
+    double dynamicPrio = std::min(0.99, basePrio + (waitTime * 0.1));
+
+    myDesiredTargets[slot] = pkt.destId;
+    myPriorities[slot] = dynamicPrio;
+    myHeurProbs[slot] = 1.0;
+    reqCandidateCount++;
+    reqSentCount++;
+    reqProbSum += 1.0;
+    requestedThisFrame++;
+
+    EV << "GreedyStdma2Hop: Node " << myId << " requesting Slot " << slot
+       << " (cost=" << cost[slot] << ", Dest=" << pkt.destId
+       << ", Prio=" << dynamicPrio << ")" << endl;
   }
   totalSlotRequestCount += requestedThisFrame;
 }

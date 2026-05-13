@@ -54,6 +54,7 @@ Git 历史使用简洁中文提交信息，偏动宾结构，例如 `添加 Dock
 
 本仓库由 Claude Code 与 Codex 交替推进。每次切换 agent 时，先读最新一份交接文档了解上轮做了什么、当前 git 状态、关键架构决策与下一步建议。最新文档：
 
+- [docs/最近工作交接-2026-05-14-论文baseline强化.md](docs/最近工作交接-2026-05-14-论文baseline强化.md)：落地 `greedy_stdma_2hop`、`zmac_inspired`、`trama_inspired` 论文 baseline 入口，并更新推荐主表/附录口径。
 - [docs/最近工作交接-2026-05-14-baseline文献口径.md](docs/最近工作交接-2026-05-14-baseline文献口径.md)：补齐 baseline 说服力分级与真实论文算法候选，明确 `*_like` 只能写 inspired/proxy 口径。
 - [docs/最近工作交接-2026-05-13-v4主表结果.md](docs/最近工作交接-2026-05-13-v4主表结果.md)：v4 主表完成核验，补齐 v3/v4 对比与论文口径；v3 仍作主表候选，v4 作 starvation/fairness trade-off 消融。
 - [docs/最近工作交接-2026-05-10-饥饿惩罚.md](docs/最近工作交接-2026-05-10-饥饿惩罚.md)：算法改进 19（饥饿惩罚）实施 + smoke 通过 + 正式实验启动记录；本轮起改为单服务器路线。

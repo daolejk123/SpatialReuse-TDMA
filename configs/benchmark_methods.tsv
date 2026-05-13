@@ -7,8 +7,11 @@ DB	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	combined D an
 plain_tdma	DynamicTDMA	TDMANetwork	omnet_only	plain_tdma	dynamic_tdma	false	fixed owner-slot TDMA without PPO
 heuristic_only	DynamicTDMA	TDMANetwork	omnet_only	heuristic_only	dynamic_tdma	false	current heuristic scheduler without PPO
 greedy_stdma	DynamicTDMA	TDMANetwork	omnet_only	greedy_stdma	dynamic_tdma	false	paper-inspired greedy spatial-reuse TDMA baseline (not full replication)
+greedy_stdma_2hop	DynamicTDMA	TDMANetwork	omnet_only	greedy_stdma_2hop	dynamic_tdma	false	strict two-hop-safe greedy STDMA approximation for thesis baseline
 traffic_adaptive_tdma	DynamicTDMA	TDMANetwork	omnet_only	traffic_adaptive_tdma	dynamic_tdma	false	paper-inspired traffic-adaptive TDMA baseline with owner-slot guarantee plus opportunistic reuse
 zmac_like	DynamicTDMA	TDMANetwork	omnet_only	zmac_like	dynamic_tdma	false	paper-inspired Z-MAC hybrid owner-slot/slot-stealing baseline
+zmac_inspired	DynamicTDMA	TDMANetwork	omnet_only	zmac_inspired	dynamic_tdma	false	Z-MAC-inspired owner/contention alias for paper-facing experiments
 trama_like	DynamicTDMA	TDMANetwork	omnet_only	trama_like	dynamic_tdma	false	paper-inspired TRAMA deterministic two-hop election baseline
+trama_inspired	DynamicTDMA	TDMANetwork	omnet_only	trama_inspired	dynamic_tdma	false	TRAMA-inspired deterministic two-hop election alias for paper-facing experiments
 bandit_index_proxy	DynamicTDMA	TDMANetwork	omnet_only	bandit_index_proxy	dynamic_tdma	false	paper-inspired queue/wait/collision index scheduling baseline
 external	external	-	external	-	canonical	false	placeholder for manually imported literature results
