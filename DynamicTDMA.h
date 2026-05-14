@@ -345,6 +345,9 @@ protected:
     double shareAvgNbr;
     double jlocal;
     double envy;
+    // 网络密度（供 Python 侧 density-aware gating 使用）
+    int activeNodes;
+    int activeEdges;
     // 奖励信号（供 RL 计算 reward）
     int nsucc;                    // 本帧成功传输时隙数
     int ncoll;                    // 本帧申请但遭遇冲突的时隙数

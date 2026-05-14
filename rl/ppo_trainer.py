@@ -87,6 +87,19 @@ class PPOConfig:
     service_debt_max_frames: int = 20
     service_debt_request_budget: float = 0.0
     service_debt_budget_boost: float = 0.0
+    service_debt_density_adaptive: bool = False
+    service_debt_dynamic_budget: bool = False
+    service_debt_sparse_edge_density: float = 0.30
+    service_debt_dense_edge_density: float = 0.45
+    service_debt_sparse_safe_ratio: float = 0.70
+    service_debt_dense_safe_ratio: float = 0.40
+    service_debt_mask_enable_factor: float = 0.50
+    service_debt_budget_min_scale: float = 0.90
+    service_debt_budget_max_scale: float = 1.10
+    service_debt_success_target: float = 0.04
+    service_debt_queue_delta_target: float = 1.0
+    service_debt_budget_success_gain: float = 0.50
+    service_debt_budget_queue_gain: float = 0.25
 
     # 饥饿惩罚（改进 19，2026-05-10）：连续 N 帧未发包后对'0'时隙施加递增惩罚
     # 0.0 = 禁用；正常使用 0.05~0.20，太大会让策略无脑申请导致碰撞激增
@@ -144,6 +157,8 @@ class NodeTransition:
     log_prob:  torch.Tensor   # (M,)             各维度 log π(a|s)
     action_mask: torch.Tensor # (M,)             训练时使用的动作 mask
     service_debt: torch.Tensor # (M,)             训练时使用的服务债务强度
+    density_factor: torch.Tensor # (M,)           密度自适应强度
+    budget_scale: torch.Tensor   # (M,)           动态预算缩放
     value:     torch.Tensor   # (M,)             逐时隙价值 V_s(t)
     reward:    torch.Tensor   # (M,)             逐时隙奖励 r_s
     advantage: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0))  # (M,) GAE
@@ -174,6 +189,7 @@ class RolloutBuffer:
     def get_tensors(self, device: torch.device):
         """将所有节点的转移打平为训练所需张量（逐时隙）。"""
         feat_seqs, actions, log_probs_old, action_masks, service_debts = [], [], [], [], []
+        density_factors, budget_scales = [], []
         advantages, returns = [], []
 
         for traj in self._buf.values():
@@ -183,6 +199,8 @@ class RolloutBuffer:
                 log_probs_old.append(tr.log_prob)
                 action_masks.append(tr.action_mask)
                 service_debts.append(tr.service_debt)
+                density_factors.append(tr.density_factor)
+                budget_scales.append(tr.budget_scale)
                 advantages.append(tr.advantage)
                 returns.append(tr.ret)
 
@@ -192,6 +210,8 @@ class RolloutBuffer:
             torch.stack(log_probs_old).to(device),    # (N, M)
             torch.stack(action_masks).to(device),      # (N, M)
             torch.stack(service_debts).to(device),     # (N, M)
+            torch.stack(density_factors).to(device),   # (N, M)
+            torch.stack(budget_scales).to(device),     # (N, M)
             torch.stack(advantages).to(device),       # (N, M) 逐时隙
             torch.stack(returns).to(device),          # (N, M) 逐时隙
         )
@@ -226,6 +246,7 @@ def _apply_request_budget(
     probs: torch.Tensor,
     valid_mask: torch.Tensor,
     debt_level: float,
+    budget_scale: float,
     cfg: PPOConfig,
 ) -> torch.Tensor:
     """Scale valid-slot probabilities to keep per-node request pressure bounded."""
@@ -234,7 +255,10 @@ def _apply_request_budget(
     valid_count = float(valid_mask.sum().item())
     if valid_count <= 0.0:
         return torch.zeros_like(probs)
-    budget = cfg.service_debt_request_budget + cfg.service_debt_budget_boost * debt_level
+    budget = (
+        cfg.service_debt_request_budget
+        + cfg.service_debt_budget_boost * debt_level
+    ) * budget_scale
     budget = min(valid_count, max(0.0, budget))
     valid_probs = probs * valid_mask
     total = float(valid_probs.sum().item())
@@ -242,6 +266,95 @@ def _apply_request_budget(
         return probs
     scaled = valid_probs * (budget / total)
     return torch.where(valid_mask > 0.5, scaled, torch.zeros_like(probs))
+
+
+def _linear_factor(value: float, low: float, high: float, invert: bool = False) -> float:
+    """Return a clipped [0,1] factor between two thresholds."""
+    if high <= low:
+        return 1.0
+    raw = (value - low) / (high - low)
+    factor = 1.0 - raw if invert else raw
+    return min(1.0, max(0.0, factor))
+
+
+def _frame_density_factor(
+    frame_obs: FrameObservation,
+    raw_masks: Dict[int, torch.Tensor],
+    cfg: PPOConfig,
+) -> tuple[float, float, float]:
+    """Estimate sparse-topology factor from active edge density and safe-slot ratio."""
+    if not cfg.service_debt_density_adaptive:
+        return 1.0, 0.0, 1.0
+
+    active_nodes = max((int(getattr(obs, "active_nodes", 0) or 0) for obs in frame_obs.nodes.values()), default=0)
+    active_edges = max((int(getattr(obs, "active_edges", 0) or 0) for obs in frame_obs.nodes.values()), default=0)
+    max_edges = active_nodes * (active_nodes - 1) / 2.0 if active_nodes > 1 else 0.0
+    edge_density = (active_edges / max_edges) if max_edges > 0 else 0.0
+
+    if raw_masks:
+        safe_ratio = float(np.mean([
+            float(mask.sum().item()) / max(1, cfg.num_slots)
+            for mask in raw_masks.values()
+        ]))
+    else:
+        safe_ratio = 1.0
+
+    edge_factor = _linear_factor(
+        edge_density,
+        cfg.service_debt_sparse_edge_density,
+        cfg.service_debt_dense_edge_density,
+        invert=True,
+    )
+    safe_factor = _linear_factor(
+        safe_ratio,
+        cfg.service_debt_dense_safe_ratio,
+        cfg.service_debt_sparse_safe_ratio,
+        invert=False,
+    )
+    return min(edge_factor, safe_factor), edge_density, safe_ratio
+
+
+def _dynamic_budget_scale(
+    success_rate_ewma: Optional[float],
+    queue_delta_ewma: float,
+    cfg: PPOConfig,
+) -> float:
+    """Close the request budget loop using recent request success and queue pressure."""
+    if not cfg.service_debt_dynamic_budget:
+        return 1.0
+    scale = 1.0
+    if success_rate_ewma is not None and cfg.service_debt_success_target > 0:
+        margin = (
+            success_rate_ewma - cfg.service_debt_success_target
+        ) / cfg.service_debt_success_target
+        if margin < 0.0:
+            scale -= cfg.service_debt_budget_success_gain * min(1.0, -margin)
+        else:
+            scale += 0.5 * cfg.service_debt_budget_success_gain * min(1.0, margin)
+    if cfg.service_debt_queue_delta_target > 0:
+        queue_pressure = queue_delta_ewma / cfg.service_debt_queue_delta_target
+        if queue_pressure > 1.0:
+            # If requests are already converting poorly, more pressure usually means
+            # collision/backoff pressure; otherwise allow a small catch-up budget.
+            if (
+                success_rate_ewma is not None
+                and success_rate_ewma >= cfg.service_debt_success_target
+            ):
+                scale += cfg.service_debt_budget_queue_gain * min(
+                    1.0,
+                    queue_pressure - 1.0,
+                )
+            else:
+                scale -= cfg.service_debt_budget_queue_gain * min(
+                    1.0,
+                    queue_pressure - 1.0,
+                )
+        elif queue_pressure < 0.0:
+            scale += 0.5 * cfg.service_debt_budget_queue_gain * min(1.0, -queue_pressure)
+    return min(
+        cfg.service_debt_budget_max_scale,
+        max(cfg.service_debt_budget_min_scale, scale),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +373,17 @@ def ppo_update(
     使用缓冲区中的轨迹执行 cfg.ppo_epochs 轮梯度更新。
     返回各损失的均值（用于日志）。
     """
-    feat_seqs, actions, log_probs_old, action_masks, service_debts, advantages, returns = buffer.get_tensors(device)
+    (
+        feat_seqs,
+        actions,
+        log_probs_old,
+        action_masks,
+        service_debts,
+        density_factors,
+        budget_scales,
+        advantages,
+        returns,
+    ) = buffer.get_tensors(device)
     # advantages: (N, M), returns: (N, M)
 
     # 标准化 advantage（全局，跨样本和时隙）
@@ -280,13 +403,24 @@ def ppo_update(
         else:
             valid_mask = torch.ones_like(actions)
         valid_count = valid_mask.sum().clamp_min(1.0)
+        if cfg.service_debt_density_adaptive:
+            probs = 0.5 + density_factors * (probs - 0.5)
+            probs = torch.where(valid_mask > 0.5, probs, torch.zeros_like(probs))
         if cfg.service_debt_action_boost > 0.0:
-            debt_boost = cfg.service_debt_action_boost * service_debts * valid_mask
+            debt_boost = (
+                cfg.service_debt_action_boost
+                * service_debts
+                * valid_mask
+            )
             probs = probs + (1.0 - probs) * debt_boost
             probs = torch.where(valid_mask > 0.5, probs, torch.zeros_like(probs))
         if cfg.service_debt_request_budget > 0.0:
             debt_scalar = service_debts.max(dim=1, keepdim=True).values
-            budgets = cfg.service_debt_request_budget + cfg.service_debt_budget_boost * debt_scalar
+            budget_scale = budget_scales.max(dim=1, keepdim=True).values.clamp_min(0.0)
+            budgets = (
+                cfg.service_debt_request_budget
+                + cfg.service_debt_budget_boost * debt_scalar
+            ) * budget_scale
             valid_slots = valid_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
             budgets = torch.minimum(budgets.clamp_min(0.0), valid_slots)
             prob_sums = (probs * valid_mask).sum(dim=1, keepdim=True).clamp_min(1e-8)
@@ -588,6 +722,10 @@ def train(cfg: PPOConfig):
     _ewma_alpha = 0.05  # EWMA 更新步长（对应衰减 0.95）
     # 饥饿计数：每节点连续未成功发包帧数（队列非空时增长，成功或队列空时归零）
     frames_since_tx: Dict[int, int] = collections.defaultdict(int)
+    prev_queue_sum: Optional[float] = None
+    request_success_ewma: Optional[float] = None
+    queue_delta_ewma: float = 0.0
+    _budget_ewma_alpha = 0.05
     # 奖励延迟对齐：帧 t 的奖励（Nsucc/Ncoll）反映帧 t-1 的 RL 动作结果
     # 因此帧 t 的 transition 需等帧 t+1 的奖励来完成
     pending_transitions: Dict[int, NodeTransition] = {}
@@ -613,7 +751,9 @@ def train(cfg: PPOConfig):
         f"reward_coef={cfg.service_debt_reward_coef}, "
         f"max_frames={cfg.service_debt_max_frames}, "
         f"request_budget={cfg.service_debt_request_budget}, "
-        f"budget_boost={cfg.service_debt_budget_boost}"
+        f"budget_boost={cfg.service_debt_budget_boost}, "
+        f"density_adaptive={cfg.service_debt_density_adaptive}, "
+        f"dynamic_budget={cfg.service_debt_dynamic_budget}"
     )
     print(f"[PPO] 等待仿真连接 {cfg.pipe_path} ...")
 
@@ -627,11 +767,49 @@ def train(cfg: PPOConfig):
                 frame_count += 1
                 t0 = time.perf_counter()
 
+                # 使用当前帧反馈闭环调节下一次动作预算。
+                frame_req = 0
+                frame_succ = 0
+                queue_sum = 0.0
+                for obs in frame_obs.nodes.values():
+                    sr = obs.SlotResult[:cfg.num_slots]
+                    frame_req += sum(1 for result in sr if result in ('1', '2'))
+                    frame_succ += sum(1 for result in sr if result == '1')
+                    queue_sum += float(obs.Qt)
+                if frame_req > 0:
+                    success_rate = frame_succ / frame_req
+                    request_success_ewma = (
+                        success_rate if request_success_ewma is None
+                        else request_success_ewma
+                             + _budget_ewma_alpha * (success_rate - request_success_ewma)
+                    )
+                if prev_queue_sum is not None:
+                    queue_delta = (queue_sum - prev_queue_sum) / max(1, cfg.num_nodes)
+                    queue_delta_ewma += _budget_ewma_alpha * (queue_delta - queue_delta_ewma)
+                prev_queue_sum = queue_sum
+
+                raw_masks: Dict[int, torch.Tensor] = {
+                    nid: compute_action_mask(obs, cfg.num_slots, cfg.action_mask)
+                    for nid, obs in frame_obs.nodes.items()
+                }
+                density_factor, edge_density, safe_ratio = _frame_density_factor(
+                    frame_obs,
+                    raw_masks,
+                    cfg,
+                )
+                budget_scale = _dynamic_budget_scale(
+                    request_success_ewma,
+                    queue_delta_ewma,
+                    cfg,
+                )
+
                 # ── 1. 推理：每节点使用自己的 Agent ──────────────────────
                 node_probs: Dict[int, np.ndarray]  = {}
                 node_values: Dict[int, np.ndarray] = {}  # 逐时隙价值 (M,)
                 node_masks: Dict[int, torch.Tensor] = {}
                 node_debts: Dict[int, torch.Tensor] = {}
+                node_density: Dict[int, torch.Tensor] = {}
+                node_budget_scales: Dict[int, torch.Tensor] = {}
 
                 for nid, obs in frame_obs.nodes.items():
                     ag = agents[nid]
@@ -657,8 +835,17 @@ def train(cfg: PPOConfig):
                     )
                     window.append(feat)
 
-                    mask_t = compute_action_mask(obs, cfg.num_slots, cfg.action_mask)
+                    raw_mask_t = raw_masks[nid]
+                    if (
+                        cfg.service_debt_density_adaptive
+                        and density_factor < cfg.service_debt_mask_enable_factor
+                    ):
+                        mask_t = torch.ones_like(raw_mask_t)
+                    else:
+                        mask_t = raw_mask_t
                     probs_exec = probs_t[0].cpu()
+                    if cfg.service_debt_density_adaptive:
+                        probs_exec = 0.5 + density_factor * (probs_exec - 0.5)
                     if cfg.action_mask != "none":
                         probs_exec = torch.where(
                             mask_t > 0.5,
@@ -670,7 +857,7 @@ def train(cfg: PPOConfig):
                     if cfg.service_debt_action_boost > 0.0 and debt_level > 0.0:
                         probs_exec = probs_exec + (
                             1.0 - probs_exec
-                        ) * cfg.service_debt_action_boost * debt_t
+                        ) * cfg.service_debt_action_boost * debt_level
                         if cfg.action_mask != "none":
                             probs_exec = torch.where(
                                 mask_t > 0.5,
@@ -681,6 +868,7 @@ def train(cfg: PPOConfig):
                         probs_exec,
                         mask_t if cfg.action_mask != "none" else torch.ones_like(probs_exec),
                         debt_level,
+                        budget_scale,
                         cfg,
                     )
 
@@ -689,6 +877,8 @@ def train(cfg: PPOConfig):
                     node_values[nid] = values_t[0].cpu().numpy()    # (M,)
                     node_masks[nid] = mask_t
                     node_debts[nid] = debt_t
+                    node_density[nid] = torch.full((cfg.num_slots,), density_factor, dtype=torch.float32)
+                    node_budget_scales[nid] = torch.full((cfg.num_slots,), budget_scale, dtype=torch.float32)
 
                 # ── 2. 采样动作（因子化伯努利）─────────────────────────
                 node_actions: Dict[int, np.ndarray] = {
@@ -780,6 +970,8 @@ def train(cfg: PPOConfig):
                         log_prob  = log_prob,
                         action_mask = node_masks[nid],
                         service_debt = node_debts[nid],
+                        density_factor = node_density[nid],
+                        budget_scale = node_budget_scales[nid],
                         value     = torch.tensor(node_values[nid], dtype=torch.float32),  # (M,)
                         reward    = torch.zeros(cfg.num_slots),   # 占位，下一帧填充
                     )
@@ -833,6 +1025,15 @@ def train(cfg: PPOConfig):
                         f"heur_dev={losses['heur_dev']:.4f}  "
                         if 'heur_dev' in losses else ""
                     )
+                    adaptive_str = (
+                        f"density={density_factor:.2f}  "
+                        f"edge={edge_density:.2f}  "
+                        f"safe={safe_ratio:.2f}  "
+                        f"budget_scale={budget_scale:.2f}  "
+                        if (cfg.service_debt_density_adaptive
+                            or cfg.service_debt_dynamic_budget)
+                        else ""
+                    )
                     print(
                         f"[PPO] frame={frame_count:5d}  update={update_count:4d}  "
                         f"avg_r={avg_r:+.3f}  "
@@ -841,6 +1042,7 @@ def train(cfg: PPOConfig):
                         f"entropy={losses['entropy']:.4f}  "
                         f"ent={cfg.ent_coef:.3f}  "
                         f"{heur_dev_str}"
+                        f"{adaptive_str}"
                         f"lr={cur_lr:.2e}  "
                         f"({elapsed*1000:.1f}ms)"
                     )
@@ -935,6 +1137,32 @@ def _parse_args() -> PPOConfig:
                    help="每节点有效时隙期望申请预算（0=不限制；budget 版建议 5.0）")
     p.add_argument("--service_debt_budget_boost", type=float, default=0.0,
                    help="service debt=1 时额外申请预算（0=不增加；budget 版建议 1.5）")
+    p.add_argument("--service_debt_density_adaptive", action="store_true",
+                   help="按 active_edges/safe-slot ratio 自适应启用 two-hop mask 与安全槽先验")
+    p.add_argument("--service_debt_dynamic_budget", action="store_true",
+                   help="按近期申请成功率和队列增长动态缩放申请预算")
+    p.add_argument("--service_debt_sparse_edge_density", type=float, default=0.30,
+                   help="低于该 active_edges 密度视为稀疏，完全启用 debt/mask")
+    p.add_argument("--service_debt_dense_edge_density", type=float, default=0.45,
+                   help="高于该 active_edges 密度视为密集，退回 B-like 行为")
+    p.add_argument("--service_debt_sparse_safe_ratio", type=float, default=0.70,
+                   help="安全槽比例高于该值时允许完全启用安全先验")
+    p.add_argument("--service_debt_dense_safe_ratio", type=float, default=0.40,
+                   help="安全槽比例低于该值时关闭安全先验")
+    p.add_argument("--service_debt_mask_enable_factor", type=float, default=0.50,
+                   help="density factor 低于该值时关闭 two-hop mask")
+    p.add_argument("--service_debt_budget_min_scale", type=float, default=0.90,
+                   help="动态预算最小缩放")
+    p.add_argument("--service_debt_budget_max_scale", type=float, default=1.10,
+                   help="动态预算最大缩放")
+    p.add_argument("--service_debt_success_target", type=float, default=0.04,
+                   help="动态预算目标申请成功率")
+    p.add_argument("--service_debt_queue_delta_target", type=float, default=1.0,
+                   help="动态预算队列增长目标（包/节点/帧）")
+    p.add_argument("--service_debt_budget_success_gain", type=float, default=0.50,
+                   help="申请成功率低于目标时的预算收缩强度")
+    p.add_argument("--service_debt_budget_queue_gain", type=float, default=0.25,
+                   help="队列增长高于目标时的预算收缩强度")
     p.add_argument("--starvation_threshold", type=int, default=5,
                    help="饥饿惩罚启动阈值：超过 N 帧未成功发包后开始惩罚（默认 5）")
     p.add_argument("--starvation_penalty_coef", type=float, default=0.0,

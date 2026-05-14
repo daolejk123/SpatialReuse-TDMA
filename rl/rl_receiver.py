@@ -51,6 +51,8 @@ class NodeObservation:
         "Qt", "lambda_ewma", "Wt", "mu_nbr",
         # 公平性与机会份额
         "Sharet", "Share_avgnbr", "Jlocal", "Envy",
+        # 网络密度
+        "active_nodes", "active_edges",
         # 奖励信号
         "Nsucc", "Ncoll", "SlotResult", "Pt1",
         # RL 乘数模式：本帧启发式申请概率向量（乘数基准参考）
@@ -79,6 +81,10 @@ class NodeObservation:
         self.Share_avgnbr = f["Share_avgnbr"]  # 一跳邻居平均时隙份额
         self.Jlocal       = f["Jlocal"]        # 局部 Jain 公平指数
         self.Envy         = f["Envy"]          # 机会差异 = Share_avgnbr - Sharet
+
+        net = raw.get("network", {})
+        self.active_nodes = net.get("active_nodes", raw.get("active_nodes", 0))
+        self.active_edges = net.get("active_edges", raw.get("active_edges", 0))
 
         rs = raw.get("reward_signal", {})
         self.Nsucc      = rs.get("Nsucc", 0)        # 本帧成功传输时隙数

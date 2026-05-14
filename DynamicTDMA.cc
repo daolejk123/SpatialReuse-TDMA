@@ -1782,6 +1782,7 @@ void DynamicTDMA::processSlotTimer() {
                      bownBitmap, t2hop.str(), ctrlCollisionCount, hcoll,
                      Qt, lambdaEwma, Wt, muNbr,
                      Sharet, ShareAvgNbr, Jlocal, Envy,
+                     activeNodeCount(), activeEdgeCount(),
                      (int)deltaTx, frameNcoll, slotResult,
                      prevPriorities, myHeurProbs});
     // 保存本帧申请概率向量，供下一帧作为 Pt-1 特征
@@ -3124,7 +3125,12 @@ void DynamicTDMA::writeRlFeatures(const RlFrameFeatures &f) {
         << "\"Jlocal\":" << f.jlocal << ","
         << "\"Envy\":" << f.envy
       << "},"
-      // 4) 奖励信号（RL reward 计算所需）
+      // 4) 网络密度（用于 Python 侧密度自适应门控）
+      << "\"network\":{"
+        << "\"active_nodes\":" << f.activeNodes << ","
+        << "\"active_edges\":" << f.activeEdges
+      << "},"
+      // 5) 奖励信号（RL reward 计算所需）
       << "\"reward_signal\":{"
         << "\"Nsucc\":" << f.nsucc << ","
         << "\"Ncoll\":" << f.ncoll << ","

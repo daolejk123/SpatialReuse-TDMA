@@ -42,6 +42,19 @@ SERVICE_DEBT_REWARD_COEF=""
 SERVICE_DEBT_MAX_FRAMES=""
 SERVICE_DEBT_REQUEST_BUDGET=""
 SERVICE_DEBT_BUDGET_BOOST=""
+SERVICE_DEBT_DENSITY_ADAPTIVE=false
+SERVICE_DEBT_DYNAMIC_BUDGET=false
+SERVICE_DEBT_SPARSE_EDGE_DENSITY=""
+SERVICE_DEBT_DENSE_EDGE_DENSITY=""
+SERVICE_DEBT_SPARSE_SAFE_RATIO=""
+SERVICE_DEBT_DENSE_SAFE_RATIO=""
+SERVICE_DEBT_MASK_ENABLE_FACTOR=""
+SERVICE_DEBT_BUDGET_MIN_SCALE=""
+SERVICE_DEBT_BUDGET_MAX_SCALE=""
+SERVICE_DEBT_SUCCESS_TARGET=""
+SERVICE_DEBT_QUEUE_DELTA_TARGET=""
+SERVICE_DEBT_BUDGET_SUCCESS_GAIN=""
+SERVICE_DEBT_BUDGET_QUEUE_GAIN=""
 STARVATION_PENALTY_COEF=""
 STARVATION_THRESHOLD=""
 STARVATION_PENALTY_MAX_FRAMES=""
@@ -86,6 +99,19 @@ while [[ $# -gt 0 ]]; do
         --service_debt_max_frames) SERVICE_DEBT_MAX_FRAMES="$2"; shift 2 ;;
         --service_debt_request_budget) SERVICE_DEBT_REQUEST_BUDGET="$2"; shift 2 ;;
         --service_debt_budget_boost) SERVICE_DEBT_BUDGET_BOOST="$2"; shift 2 ;;
+        --service_debt_density_adaptive) SERVICE_DEBT_DENSITY_ADAPTIVE=true; shift ;;
+        --service_debt_dynamic_budget) SERVICE_DEBT_DYNAMIC_BUDGET=true; shift ;;
+        --service_debt_sparse_edge_density) SERVICE_DEBT_SPARSE_EDGE_DENSITY="$2"; shift 2 ;;
+        --service_debt_dense_edge_density) SERVICE_DEBT_DENSE_EDGE_DENSITY="$2"; shift 2 ;;
+        --service_debt_sparse_safe_ratio) SERVICE_DEBT_SPARSE_SAFE_RATIO="$2"; shift 2 ;;
+        --service_debt_dense_safe_ratio) SERVICE_DEBT_DENSE_SAFE_RATIO="$2"; shift 2 ;;
+        --service_debt_mask_enable_factor) SERVICE_DEBT_MASK_ENABLE_FACTOR="$2"; shift 2 ;;
+        --service_debt_budget_min_scale) SERVICE_DEBT_BUDGET_MIN_SCALE="$2"; shift 2 ;;
+        --service_debt_budget_max_scale) SERVICE_DEBT_BUDGET_MAX_SCALE="$2"; shift 2 ;;
+        --service_debt_success_target) SERVICE_DEBT_SUCCESS_TARGET="$2"; shift 2 ;;
+        --service_debt_queue_delta_target) SERVICE_DEBT_QUEUE_DELTA_TARGET="$2"; shift 2 ;;
+        --service_debt_budget_success_gain) SERVICE_DEBT_BUDGET_SUCCESS_GAIN="$2"; shift 2 ;;
+        --service_debt_budget_queue_gain) SERVICE_DEBT_BUDGET_QUEUE_GAIN="$2"; shift 2 ;;
         --starvation_penalty_coef) STARVATION_PENALTY_COEF="$2"; shift 2 ;;
         --starvation_threshold) STARVATION_THRESHOLD="$2"; shift 2 ;;
         --starvation_penalty_max_frames) STARVATION_PENALTY_MAX_FRAMES="$2"; shift 2 ;;
@@ -196,6 +222,10 @@ info "num_nodes = ${NUM_NODES}, num_slots = ${NUM_SLOTS}"
 [ -n "$LOGICAL_TOPOLOGY_MODE" ] && info "logical_topology_mode = ${LOGICAL_TOPOLOGY_MODE}"
 info "启用 B 时的 heur_deviation_coef = ${HEUR_COEF}"
 [ -n "$IDLE_QUEUE_PENALTY" ] && info "idle_queue_penalty = ${IDLE_QUEUE_PENALTY}"
+[ "$SERVICE_DEBT_DENSITY_ADAPTIVE" = true ] && info "service_debt_density_adaptive = true"
+[ "$SERVICE_DEBT_DYNAMIC_BUDGET" = true ] && info "service_debt_dynamic_budget = true"
+[ -n "$SERVICE_DEBT_SPARSE_EDGE_DENSITY" ] && info "service_debt_sparse_edge_density = ${SERVICE_DEBT_SPARSE_EDGE_DENSITY}"
+[ -n "$SERVICE_DEBT_DENSE_EDGE_DENSITY" ] && info "service_debt_dense_edge_density = ${SERVICE_DEBT_DENSE_EDGE_DENSITY}"
 info "metrics_mode = ${METRICS_MODE}"
 info "metrics_flush_every = ${METRICS_FLUSH_EVERY}"
 info "sim_log_mode = ${SIM_LOG_MODE}"
@@ -211,13 +241,14 @@ printf 'scenario\tgroup\tseed\tlog_dir\ttarget_updates\ttarget_frames\tsim_time\
 # ---- 组 → 参数映射 ----
 group_params() {
     case "$1" in
-        baseline)             echo "false 0.0 none 0.5 0 0 0 20 0 0" ;;
-        D)                    echo "true  0.0 none 0.5 0 0 0 20 0 0" ;;
-        B)                    echo "false ${HEUR_COEF} none 0.5 0 0 0 20 0 0" ;;
-        B_masked)             echo "false ${HEUR_COEF} twohop 0.75 0 0 0 20 0 0" ;;
-        B_masked_debt)        echo "false ${HEUR_COEF} twohop 0.75 ${SERVICE_DEBT_THRESHOLD:-5} ${SERVICE_DEBT_ACTION_BOOST:-0.25} ${SERVICE_DEBT_REWARD_COEF:-0.5} ${SERVICE_DEBT_MAX_FRAMES:-20} 0 0" ;;
-        B_masked_debt_budget) echo "false ${HEUR_COEF} twohop 0.75 ${SERVICE_DEBT_THRESHOLD:-5} ${SERVICE_DEBT_ACTION_BOOST:-0.15} ${SERVICE_DEBT_REWARD_COEF:-0.75} ${SERVICE_DEBT_MAX_FRAMES:-20} ${SERVICE_DEBT_REQUEST_BUDGET:-5.0} ${SERVICE_DEBT_BUDGET_BOOST:-3.0}" ;;
-        DB)                   echo "true  ${HEUR_COEF} none 0.5 0 0 0 20 0 0" ;;
+        baseline)               echo "false 0.0 none 0.5 0 0 0 20 0 0 false false" ;;
+        D)                      echo "true  0.0 none 0.5 0 0 0 20 0 0 false false" ;;
+        B)                      echo "false ${HEUR_COEF} none 0.5 0 0 0 20 0 0 false false" ;;
+        B_masked)               echo "false ${HEUR_COEF} twohop 0.75 0 0 0 20 0 0 false false" ;;
+        B_masked_debt)          echo "false ${HEUR_COEF} twohop 0.75 ${SERVICE_DEBT_THRESHOLD:-5} ${SERVICE_DEBT_ACTION_BOOST:-0.25} ${SERVICE_DEBT_REWARD_COEF:-0.5} ${SERVICE_DEBT_MAX_FRAMES:-20} 0 0 false false" ;;
+        B_masked_debt_budget)   echo "false ${HEUR_COEF} twohop 0.75 ${SERVICE_DEBT_THRESHOLD:-5} ${SERVICE_DEBT_ACTION_BOOST:-0.15} ${SERVICE_DEBT_REWARD_COEF:-0.75} ${SERVICE_DEBT_MAX_FRAMES:-20} ${SERVICE_DEBT_REQUEST_BUDGET:-5.0} ${SERVICE_DEBT_BUDGET_BOOST:-3.0} false false" ;;
+        B_masked_debt_adaptive) echo "false ${HEUR_COEF} twohop 0.75 ${SERVICE_DEBT_THRESHOLD:-5} ${SERVICE_DEBT_ACTION_BOOST:-0.15} ${SERVICE_DEBT_REWARD_COEF:-0.75} ${SERVICE_DEBT_MAX_FRAMES:-20} ${SERVICE_DEBT_REQUEST_BUDGET:-5.0} ${SERVICE_DEBT_BUDGET_BOOST:-3.0} true true" ;;
+        DB)                     echo "true  ${HEUR_COEF} none 0.5 0 0 0 20 0 0 false false" ;;
         *) error "未知实验组: $1"; return 1 ;;
     esac
 }
@@ -229,10 +260,14 @@ run_one() {
     local RUN_SERVICE_DEBT_THRESHOLD RUN_SERVICE_DEBT_ACTION_BOOST
     local RUN_SERVICE_DEBT_REWARD_COEF RUN_SERVICE_DEBT_MAX_FRAMES
     local RUN_SERVICE_DEBT_REQUEST_BUDGET RUN_SERVICE_DEBT_BUDGET_BOOST
+    local RUN_SERVICE_DEBT_DENSITY_ADAPTIVE RUN_SERVICE_DEBT_DYNAMIC_BUDGET
     read -r ADAPTIVE HDEV ACTION_MASK ACTION_INIT_PROB \
         RUN_SERVICE_DEBT_THRESHOLD RUN_SERVICE_DEBT_ACTION_BOOST \
         RUN_SERVICE_DEBT_REWARD_COEF RUN_SERVICE_DEBT_MAX_FRAMES \
-        RUN_SERVICE_DEBT_REQUEST_BUDGET RUN_SERVICE_DEBT_BUDGET_BOOST <<< "$(group_params "$group")"
+        RUN_SERVICE_DEBT_REQUEST_BUDGET RUN_SERVICE_DEBT_BUDGET_BOOST \
+        RUN_SERVICE_DEBT_DENSITY_ADAPTIVE RUN_SERVICE_DEBT_DYNAMIC_BUDGET <<< "$(group_params "$group")"
+    [ "$SERVICE_DEBT_DENSITY_ADAPTIVE" = true ] && RUN_SERVICE_DEBT_DENSITY_ADAPTIVE=true
+    [ "$SERVICE_DEBT_DYNAMIC_BUDGET" = true ] && RUN_SERVICE_DEBT_DYNAMIC_BUDGET=true
 
     local LOG_DIR="$ROOT_LOG/${group}/seed${seed}"
     mkdir -p "$LOG_DIR"
@@ -240,7 +275,7 @@ run_one() {
         "${SCENARIO_NAME:-}" "$group" "$seed" "$LOG_DIR" \
         "$TARGET_UPDATES" "$TARGET_FRAMES" "$SIM_TIME" >> "$MANIFEST"
 
-    section "[${group} / seed=${seed}] adaptive=${ADAPTIVE}, heur_coef=${HDEV}, action_mask=${ACTION_MASK}, action_init_prob=${ACTION_INIT_PROB}, service_debt=${RUN_SERVICE_DEBT_ACTION_BOOST}/${RUN_SERVICE_DEBT_REWARD_COEF}, budget=${RUN_SERVICE_DEBT_REQUEST_BUDGET}+${RUN_SERVICE_DEBT_BUDGET_BOOST}"
+    section "[${group} / seed=${seed}] adaptive=${ADAPTIVE}, heur_coef=${HDEV}, action_mask=${ACTION_MASK}, action_init_prob=${ACTION_INIT_PROB}, service_debt=${RUN_SERVICE_DEBT_ACTION_BOOST}/${RUN_SERVICE_DEBT_REWARD_COEF}, budget=${RUN_SERVICE_DEBT_REQUEST_BUDGET}+${RUN_SERVICE_DEBT_BUDGET_BOOST}, density=${RUN_SERVICE_DEBT_DENSITY_ADAPTIVE}, dynamic_budget=${RUN_SERVICE_DEBT_DYNAMIC_BUDGET}"
 
     if [ "$DRY_RUN" = true ]; then
         info "[DRY] run_joint.sh --num_slots $NUM_SLOTS --num_nodes $NUM_NODES \\"
@@ -258,6 +293,10 @@ run_one() {
         [ "$RUN_SERVICE_DEBT_ACTION_BOOST" != "0" ] && info "                   --service_debt_threshold $RUN_SERVICE_DEBT_THRESHOLD --service_debt_action_boost $RUN_SERVICE_DEBT_ACTION_BOOST \\"
         [ "$RUN_SERVICE_DEBT_REWARD_COEF" != "0" ] && info "                   --service_debt_reward_coef $RUN_SERVICE_DEBT_REWARD_COEF --service_debt_max_frames $RUN_SERVICE_DEBT_MAX_FRAMES \\"
         [ "$RUN_SERVICE_DEBT_REQUEST_BUDGET" != "0" ] && info "                   --service_debt_request_budget $RUN_SERVICE_DEBT_REQUEST_BUDGET --service_debt_budget_boost $RUN_SERVICE_DEBT_BUDGET_BOOST \\"
+        [ "$RUN_SERVICE_DEBT_DENSITY_ADAPTIVE" = true ] && info "                   --service_debt_density_adaptive \\"
+        [ "$RUN_SERVICE_DEBT_DYNAMIC_BUDGET" = true ] && info "                   --service_debt_dynamic_budget \\"
+        [ -n "$SERVICE_DEBT_SPARSE_EDGE_DENSITY" ] && info "                   --service_debt_sparse_edge_density $SERVICE_DEBT_SPARSE_EDGE_DENSITY \\"
+        [ -n "$SERVICE_DEBT_DENSE_EDGE_DENSITY" ] && info "                   --service_debt_dense_edge_density $SERVICE_DEBT_DENSE_EDGE_DENSITY \\"
         info "                   --metrics_flush_every $METRICS_FLUSH_EVERY --sim_log_mode $SIM_LOG_MODE \\"
         [ -n "$IDLE_QUEUE_PENALTY" ] && info "                   --idle_queue_penalty $IDLE_QUEUE_PENALTY \\"
         [ -n "$SAVE_EVERY" ] && info "                   --save_every $SAVE_EVERY \\"
@@ -286,6 +325,19 @@ run_one() {
     [ "$RUN_SERVICE_DEBT_REWARD_COEF" != "0" ] && DEBT_ARGS+=(--service_debt_max_frames "$RUN_SERVICE_DEBT_MAX_FRAMES")
     [ "$RUN_SERVICE_DEBT_REQUEST_BUDGET" != "0" ] && DEBT_ARGS+=(--service_debt_request_budget "$RUN_SERVICE_DEBT_REQUEST_BUDGET")
     [ "$RUN_SERVICE_DEBT_REQUEST_BUDGET" != "0" ] && DEBT_ARGS+=(--service_debt_budget_boost "$RUN_SERVICE_DEBT_BUDGET_BOOST")
+    [ "$RUN_SERVICE_DEBT_DENSITY_ADAPTIVE" = true ] && DEBT_ARGS+=(--service_debt_density_adaptive)
+    [ "$RUN_SERVICE_DEBT_DYNAMIC_BUDGET" = true ] && DEBT_ARGS+=(--service_debt_dynamic_budget)
+    [ -n "$SERVICE_DEBT_SPARSE_EDGE_DENSITY" ] && DEBT_ARGS+=(--service_debt_sparse_edge_density "$SERVICE_DEBT_SPARSE_EDGE_DENSITY")
+    [ -n "$SERVICE_DEBT_DENSE_EDGE_DENSITY" ] && DEBT_ARGS+=(--service_debt_dense_edge_density "$SERVICE_DEBT_DENSE_EDGE_DENSITY")
+    [ -n "$SERVICE_DEBT_SPARSE_SAFE_RATIO" ] && DEBT_ARGS+=(--service_debt_sparse_safe_ratio "$SERVICE_DEBT_SPARSE_SAFE_RATIO")
+    [ -n "$SERVICE_DEBT_DENSE_SAFE_RATIO" ] && DEBT_ARGS+=(--service_debt_dense_safe_ratio "$SERVICE_DEBT_DENSE_SAFE_RATIO")
+    [ -n "$SERVICE_DEBT_MASK_ENABLE_FACTOR" ] && DEBT_ARGS+=(--service_debt_mask_enable_factor "$SERVICE_DEBT_MASK_ENABLE_FACTOR")
+    [ -n "$SERVICE_DEBT_BUDGET_MIN_SCALE" ] && DEBT_ARGS+=(--service_debt_budget_min_scale "$SERVICE_DEBT_BUDGET_MIN_SCALE")
+    [ -n "$SERVICE_DEBT_BUDGET_MAX_SCALE" ] && DEBT_ARGS+=(--service_debt_budget_max_scale "$SERVICE_DEBT_BUDGET_MAX_SCALE")
+    [ -n "$SERVICE_DEBT_SUCCESS_TARGET" ] && DEBT_ARGS+=(--service_debt_success_target "$SERVICE_DEBT_SUCCESS_TARGET")
+    [ -n "$SERVICE_DEBT_QUEUE_DELTA_TARGET" ] && DEBT_ARGS+=(--service_debt_queue_delta_target "$SERVICE_DEBT_QUEUE_DELTA_TARGET")
+    [ -n "$SERVICE_DEBT_BUDGET_SUCCESS_GAIN" ] && DEBT_ARGS+=(--service_debt_budget_success_gain "$SERVICE_DEBT_BUDGET_SUCCESS_GAIN")
+    [ -n "$SERVICE_DEBT_BUDGET_QUEUE_GAIN" ] && DEBT_ARGS+=(--service_debt_budget_queue_gain "$SERVICE_DEBT_BUDGET_QUEUE_GAIN")
     local STARVATION_ARGS=()
     [ -n "$STARVATION_PENALTY_COEF" ] && STARVATION_ARGS+=(--starvation_penalty_coef "$STARVATION_PENALTY_COEF")
     [ -n "$STARVATION_THRESHOLD" ] && STARVATION_ARGS+=(--starvation_threshold "$STARVATION_THRESHOLD")
