@@ -80,6 +80,14 @@ class PPOConfig:
     # 有队列但未申请的轻量惩罚，0.0 = 禁用（保持旧 reward 完全一致）
     idle_queue_penalty: float = 0.0
 
+    # 服务债务：长期未成功发包且队列非空的节点，在安全槽上更积极申请，并奖励还债成功。
+    service_debt_threshold: int = 5
+    service_debt_action_boost: float = 0.0
+    service_debt_reward_coef: float = 0.0
+    service_debt_max_frames: int = 20
+    service_debt_request_budget: float = 0.0
+    service_debt_budget_boost: float = 0.0
+
     # 饥饿惩罚（改进 19，2026-05-10）：连续 N 帧未发包后对'0'时隙施加递增惩罚
     # 0.0 = 禁用；正常使用 0.05~0.20，太大会让策略无脑申请导致碰撞激增
     starvation_threshold:           int   = 5     # 超过 N 帧未发包才开始惩罚
@@ -135,6 +143,7 @@ class NodeTransition:
     action:    torch.Tensor   # (M,)             实际执行的二值动作
     log_prob:  torch.Tensor   # (M,)             各维度 log π(a|s)
     action_mask: torch.Tensor # (M,)             训练时使用的动作 mask
+    service_debt: torch.Tensor # (M,)             训练时使用的服务债务强度
     value:     torch.Tensor   # (M,)             逐时隙价值 V_s(t)
     reward:    torch.Tensor   # (M,)             逐时隙奖励 r_s
     advantage: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0))  # (M,) GAE
@@ -164,7 +173,7 @@ class RolloutBuffer:
 
     def get_tensors(self, device: torch.device):
         """将所有节点的转移打平为训练所需张量（逐时隙）。"""
-        feat_seqs, actions, log_probs_old, action_masks = [], [], [], []
+        feat_seqs, actions, log_probs_old, action_masks, service_debts = [], [], [], [], []
         advantages, returns = [], []
 
         for traj in self._buf.values():
@@ -173,6 +182,7 @@ class RolloutBuffer:
                 actions.append(tr.action)
                 log_probs_old.append(tr.log_prob)
                 action_masks.append(tr.action_mask)
+                service_debts.append(tr.service_debt)
                 advantages.append(tr.advantage)
                 returns.append(tr.ret)
 
@@ -181,6 +191,7 @@ class RolloutBuffer:
             torch.stack(actions).to(device),          # (N, M)
             torch.stack(log_probs_old).to(device),    # (N, M)
             torch.stack(action_masks).to(device),      # (N, M)
+            torch.stack(service_debts).to(device),     # (N, M)
             torch.stack(advantages).to(device),       # (N, M) 逐时隙
             torch.stack(returns).to(device),          # (N, M) 逐时隙
         )
@@ -190,6 +201,47 @@ class RolloutBuffer:
 
     def size(self) -> int:
         return sum(len(v) for v in self._buf.values())
+
+
+# ---------------------------------------------------------------------------
+# 服务债务辅助函数
+# ---------------------------------------------------------------------------
+
+def _service_debt_level(obs: NodeObservation, frames_since_tx: int, cfg: PPOConfig) -> float:
+    """Return normalized service debt in [0, 1] for a node observation."""
+    if (
+        obs.Qt <= 0
+        or cfg.service_debt_threshold <= 0
+        or cfg.service_debt_max_frames <= 0
+        or frames_since_tx <= cfg.service_debt_threshold
+    ):
+        return 0.0
+    return min(
+        1.0,
+        (frames_since_tx - cfg.service_debt_threshold) / cfg.service_debt_max_frames,
+    )
+
+
+def _apply_request_budget(
+    probs: torch.Tensor,
+    valid_mask: torch.Tensor,
+    debt_level: float,
+    cfg: PPOConfig,
+) -> torch.Tensor:
+    """Scale valid-slot probabilities to keep per-node request pressure bounded."""
+    if cfg.service_debt_request_budget <= 0.0:
+        return probs
+    valid_count = float(valid_mask.sum().item())
+    if valid_count <= 0.0:
+        return torch.zeros_like(probs)
+    budget = cfg.service_debt_request_budget + cfg.service_debt_budget_boost * debt_level
+    budget = min(valid_count, max(0.0, budget))
+    valid_probs = probs * valid_mask
+    total = float(valid_probs.sum().item())
+    if total <= budget or total <= 1e-8:
+        return probs
+    scaled = valid_probs * (budget / total)
+    return torch.where(valid_mask > 0.5, scaled, torch.zeros_like(probs))
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +260,7 @@ def ppo_update(
     使用缓冲区中的轨迹执行 cfg.ppo_epochs 轮梯度更新。
     返回各损失的均值（用于日志）。
     """
-    feat_seqs, actions, log_probs_old, action_masks, advantages, returns = buffer.get_tensors(device)
+    feat_seqs, actions, log_probs_old, action_masks, service_debts, advantages, returns = buffer.get_tensors(device)
     # advantages: (N, M), returns: (N, M)
 
     # 标准化 advantage（全局，跨样本和时隙）
@@ -228,6 +280,18 @@ def ppo_update(
         else:
             valid_mask = torch.ones_like(actions)
         valid_count = valid_mask.sum().clamp_min(1.0)
+        if cfg.service_debt_action_boost > 0.0:
+            debt_boost = cfg.service_debt_action_boost * service_debts * valid_mask
+            probs = probs + (1.0 - probs) * debt_boost
+            probs = torch.where(valid_mask > 0.5, probs, torch.zeros_like(probs))
+        if cfg.service_debt_request_budget > 0.0:
+            debt_scalar = service_debts.max(dim=1, keepdim=True).values
+            budgets = cfg.service_debt_request_budget + cfg.service_debt_budget_boost * debt_scalar
+            valid_slots = valid_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+            budgets = torch.minimum(budgets.clamp_min(0.0), valid_slots)
+            prob_sums = (probs * valid_mask).sum(dim=1, keepdim=True).clamp_min(1e-8)
+            scales = torch.minimum(torch.ones_like(prob_sums), budgets / prob_sums)
+            probs = torch.where(valid_mask > 0.5, probs * scales, torch.zeros_like(probs))
         probs = probs.clamp(1e-6, 1.0 - 1e-6)
 
         # log π(a|s)：M 个独立伯努利分布
@@ -542,6 +606,15 @@ def train(cfg: PPOConfig):
     print(f"[PPO] update_every={cfg.update_every}  ppo_epochs={cfg.ppo_epochs}  lr={cfg.lr}")
     print(f"[PPO] action_mask={cfg.action_mask}")
     print(f"[PPO] action_init_prob={cfg.action_init_prob}")
+    print(
+        "[PPO] service_debt="
+        f"threshold={cfg.service_debt_threshold}, "
+        f"action_boost={cfg.service_debt_action_boost}, "
+        f"reward_coef={cfg.service_debt_reward_coef}, "
+        f"max_frames={cfg.service_debt_max_frames}, "
+        f"request_budget={cfg.service_debt_request_budget}, "
+        f"budget_boost={cfg.service_debt_budget_boost}"
+    )
     print(f"[PPO] 等待仿真连接 {cfg.pipe_path} ...")
 
     try:
@@ -558,6 +631,7 @@ def train(cfg: PPOConfig):
                 node_probs: Dict[int, np.ndarray]  = {}
                 node_values: Dict[int, np.ndarray] = {}  # 逐时隙价值 (M,)
                 node_masks: Dict[int, torch.Tensor] = {}
+                node_debts: Dict[int, torch.Tensor] = {}
 
                 for nid, obs in frame_obs.nodes.items():
                     ag = agents[nid]
@@ -591,10 +665,30 @@ def train(cfg: PPOConfig):
                             probs_exec,
                             torch.zeros_like(probs_exec),
                         )
+                    debt_level = _service_debt_level(obs, frames_since_tx[nid], cfg)
+                    debt_t = torch.full((cfg.num_slots,), debt_level, dtype=torch.float32)
+                    if cfg.service_debt_action_boost > 0.0 and debt_level > 0.0:
+                        probs_exec = probs_exec + (
+                            1.0 - probs_exec
+                        ) * cfg.service_debt_action_boost * debt_t
+                        if cfg.action_mask != "none":
+                            probs_exec = torch.where(
+                                mask_t > 0.5,
+                                probs_exec,
+                                torch.zeros_like(probs_exec),
+                            )
+                    probs_exec = _apply_request_budget(
+                        probs_exec,
+                        mask_t if cfg.action_mask != "none" else torch.ones_like(probs_exec),
+                        debt_level,
+                        cfg,
+                    )
 
+                    probs_exec = probs_exec.clamp(0.0, 1.0)
                     node_probs[nid]  = probs_exec.numpy()
                     node_values[nid] = values_t[0].cpu().numpy()    # (M,)
                     node_masks[nid] = mask_t
+                    node_debts[nid] = debt_t
 
                 # ── 2. 采样动作（因子化伯努利）─────────────────────────
                 node_actions: Dict[int, np.ndarray] = {
@@ -637,14 +731,25 @@ def train(cfg: PPOConfig):
                 # 因此帧 t 的奖励应配对给帧 t-1 的动作
                 for nid in list(pending_transitions.keys()):
                     if nid in node_rewards:
-                        raw_r = node_rewards[nid]          # (M,) 逐时隙奖励
+                        pt = pending_transitions.pop(nid)
+                        raw_r = node_rewards[nid].clone()  # (M,) 逐时隙奖励
+                        if cfg.service_debt_reward_coef > 0.0:
+                            sr = frame_obs.nodes[nid].SlotResult[:cfg.num_slots]
+                            success_mask = torch.tensor(
+                                [1.0 if result == '1' else 0.0 for result in sr],
+                                dtype=torch.float32,
+                            )
+                            raw_r = raw_r + (
+                                cfg.service_debt_reward_coef
+                                * pt.service_debt
+                                * success_mask
+                            )
                         if nid not in reward_baselines:
                             reward_baselines[nid] = torch.zeros(cfg.num_slots)
                         baseline = reward_baselines[nid]
                         reward_baselines[nid] = baseline + _ewma_alpha * (raw_r - baseline)
                         shaped_r = raw_r - baseline        # (M,) 差分奖励
 
-                        pt = pending_transitions.pop(nid)
                         pt.reward = shaped_r
                         buffers[nid].add(nid, pt)
                         episode_rewards[nid] += raw_r.sum().item()  # 聚合用于日志
@@ -674,6 +779,7 @@ def train(cfg: PPOConfig):
                         action    = act_t,
                         log_prob  = log_prob,
                         action_mask = node_masks[nid],
+                        service_debt = node_debts[nid],
                         value     = torch.tensor(node_values[nid], dtype=torch.float32),  # (M,)
                         reward    = torch.zeros(cfg.num_slots),   # 占位，下一帧填充
                     )
@@ -817,6 +923,18 @@ def _parse_args() -> PPOConfig:
                    help="Actor 初始申请概率（默认 0.5；masked STDMA 先验可用 0.75）")
     p.add_argument("--idle_queue_penalty", type=float, default=0.0,
                    help="有队列但未申请时隙的轻量惩罚（0=禁用，建议 0.05）")
+    p.add_argument("--service_debt_threshold", type=int, default=5,
+                   help="服务债务启动阈值：超过 N 帧未成功发包后开始增强安全槽申请")
+    p.add_argument("--service_debt_action_boost", type=float, default=0.0,
+                   help="服务债务动作增强系数（0=禁用，建议 0.25）")
+    p.add_argument("--service_debt_reward_coef", type=float, default=0.0,
+                   help="服务债务成功发包奖励系数（0=禁用，建议 0.5）")
+    p.add_argument("--service_debt_max_frames", type=int, default=20,
+                   help="服务债务归一化封顶帧数（默认 20）")
+    p.add_argument("--service_debt_request_budget", type=float, default=0.0,
+                   help="每节点有效时隙期望申请预算（0=不限制；budget 版建议 5.0）")
+    p.add_argument("--service_debt_budget_boost", type=float, default=0.0,
+                   help="service debt=1 时额外申请预算（0=不增加；budget 版建议 1.5）")
     p.add_argument("--starvation_threshold", type=int, default=5,
                    help="饥饿惩罚启动阈值：超过 N 帧未成功发包后开始惩罚（默认 5）")
     p.add_argument("--starvation_penalty_coef", type=float, default=0.0,

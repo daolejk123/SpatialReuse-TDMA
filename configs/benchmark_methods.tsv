@@ -3,6 +3,8 @@ baseline	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	current
 ppo_baseline	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	explicit PPO baseline alias for traditional-baseline comparisons
 B	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	current B mainline path
 B_masked	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B with two-hop unsafe slots masked and 0.75 safe-slot initialization
+B_masked_debt	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_masked plus service-debt action boost and success reward
+B_masked_debt_budget	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_masked_debt with bounded per-node request budget
 D	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	adaptive multiplier ablation path
 DB	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	combined D and B ablation path
 plain_tdma	DynamicTDMA	TDMANetwork	omnet_only	plain_tdma	dynamic_tdma	false	fixed owner-slot TDMA without PPO

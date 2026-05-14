@@ -36,6 +36,12 @@ NUM_SLOTS=10
 NUM_NODES=9
 HEUR_COEF="0.01"
 IDLE_QUEUE_PENALTY=""
+SERVICE_DEBT_THRESHOLD=""
+SERVICE_DEBT_ACTION_BOOST=""
+SERVICE_DEBT_REWARD_COEF=""
+SERVICE_DEBT_MAX_FRAMES=""
+SERVICE_DEBT_REQUEST_BUDGET=""
+SERVICE_DEBT_BUDGET_BOOST=""
 STARVATION_PENALTY_COEF=""
 STARVATION_THRESHOLD=""
 STARVATION_PENALTY_MAX_FRAMES=""
@@ -74,6 +80,12 @@ while [[ $# -gt 0 ]]; do
         --num_nodes)  NUM_NODES="$2";  shift 2 ;;
         --heur_coef)  HEUR_COEF="$2";  shift 2 ;;
         --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
+        --service_debt_threshold) SERVICE_DEBT_THRESHOLD="$2"; shift 2 ;;
+        --service_debt_action_boost) SERVICE_DEBT_ACTION_BOOST="$2"; shift 2 ;;
+        --service_debt_reward_coef) SERVICE_DEBT_REWARD_COEF="$2"; shift 2 ;;
+        --service_debt_max_frames) SERVICE_DEBT_MAX_FRAMES="$2"; shift 2 ;;
+        --service_debt_request_budget) SERVICE_DEBT_REQUEST_BUDGET="$2"; shift 2 ;;
+        --service_debt_budget_boost) SERVICE_DEBT_BUDGET_BOOST="$2"; shift 2 ;;
         --starvation_penalty_coef) STARVATION_PENALTY_COEF="$2"; shift 2 ;;
         --starvation_threshold) STARVATION_THRESHOLD="$2"; shift 2 ;;
         --starvation_penalty_max_frames) STARVATION_PENALTY_MAX_FRAMES="$2"; shift 2 ;;
@@ -199,11 +211,13 @@ printf 'scenario\tgroup\tseed\tlog_dir\ttarget_updates\ttarget_frames\tsim_time\
 # ---- 组 → 参数映射 ----
 group_params() {
     case "$1" in
-        baseline) echo "false 0.0 none 0.5" ;;
-        D)        echo "true  0.0 none 0.5" ;;
-        B)        echo "false ${HEUR_COEF} none 0.5" ;;
-        B_masked) echo "false ${HEUR_COEF} twohop 0.75" ;;
-        DB)       echo "true  ${HEUR_COEF} none 0.5" ;;
+        baseline)             echo "false 0.0 none 0.5 0 0 0 20 0 0" ;;
+        D)                    echo "true  0.0 none 0.5 0 0 0 20 0 0" ;;
+        B)                    echo "false ${HEUR_COEF} none 0.5 0 0 0 20 0 0" ;;
+        B_masked)             echo "false ${HEUR_COEF} twohop 0.75 0 0 0 20 0 0" ;;
+        B_masked_debt)        echo "false ${HEUR_COEF} twohop 0.75 ${SERVICE_DEBT_THRESHOLD:-5} ${SERVICE_DEBT_ACTION_BOOST:-0.25} ${SERVICE_DEBT_REWARD_COEF:-0.5} ${SERVICE_DEBT_MAX_FRAMES:-20} 0 0" ;;
+        B_masked_debt_budget) echo "false ${HEUR_COEF} twohop 0.75 ${SERVICE_DEBT_THRESHOLD:-5} ${SERVICE_DEBT_ACTION_BOOST:-0.15} ${SERVICE_DEBT_REWARD_COEF:-0.75} ${SERVICE_DEBT_MAX_FRAMES:-20} ${SERVICE_DEBT_REQUEST_BUDGET:-5.0} ${SERVICE_DEBT_BUDGET_BOOST:-3.0}" ;;
+        DB)                   echo "true  ${HEUR_COEF} none 0.5 0 0 0 20 0 0" ;;
         *) error "未知实验组: $1"; return 1 ;;
     esac
 }
@@ -211,7 +225,14 @@ group_params() {
 # ---- 单次运行 ----
 run_one() {
     local group=$1 seed=$2
-    read -r ADAPTIVE HDEV ACTION_MASK ACTION_INIT_PROB <<< "$(group_params "$group")"
+    local ADAPTIVE HDEV ACTION_MASK ACTION_INIT_PROB
+    local RUN_SERVICE_DEBT_THRESHOLD RUN_SERVICE_DEBT_ACTION_BOOST
+    local RUN_SERVICE_DEBT_REWARD_COEF RUN_SERVICE_DEBT_MAX_FRAMES
+    local RUN_SERVICE_DEBT_REQUEST_BUDGET RUN_SERVICE_DEBT_BUDGET_BOOST
+    read -r ADAPTIVE HDEV ACTION_MASK ACTION_INIT_PROB \
+        RUN_SERVICE_DEBT_THRESHOLD RUN_SERVICE_DEBT_ACTION_BOOST \
+        RUN_SERVICE_DEBT_REWARD_COEF RUN_SERVICE_DEBT_MAX_FRAMES \
+        RUN_SERVICE_DEBT_REQUEST_BUDGET RUN_SERVICE_DEBT_BUDGET_BOOST <<< "$(group_params "$group")"
 
     local LOG_DIR="$ROOT_LOG/${group}/seed${seed}"
     mkdir -p "$LOG_DIR"
@@ -219,7 +240,7 @@ run_one() {
         "${SCENARIO_NAME:-}" "$group" "$seed" "$LOG_DIR" \
         "$TARGET_UPDATES" "$TARGET_FRAMES" "$SIM_TIME" >> "$MANIFEST"
 
-    section "[${group} / seed=${seed}] adaptive=${ADAPTIVE}, heur_coef=${HDEV}, action_mask=${ACTION_MASK}, action_init_prob=${ACTION_INIT_PROB}"
+    section "[${group} / seed=${seed}] adaptive=${ADAPTIVE}, heur_coef=${HDEV}, action_mask=${ACTION_MASK}, action_init_prob=${ACTION_INIT_PROB}, service_debt=${RUN_SERVICE_DEBT_ACTION_BOOST}/${RUN_SERVICE_DEBT_REWARD_COEF}, budget=${RUN_SERVICE_DEBT_REQUEST_BUDGET}+${RUN_SERVICE_DEBT_BUDGET_BOOST}"
 
     if [ "$DRY_RUN" = true ]; then
         info "[DRY] run_joint.sh --num_slots $NUM_SLOTS --num_nodes $NUM_NODES \\"
@@ -234,6 +255,9 @@ run_one() {
         info "                   --heur_deviation_coef $HDEV --metrics_mode $METRICS_MODE \\"
         [ "$ACTION_MASK" != "none" ] && info "                   --action_mask $ACTION_MASK \\"
         [ "$ACTION_INIT_PROB" != "0.5" ] && info "                   --action_init_prob $ACTION_INIT_PROB \\"
+        [ "$RUN_SERVICE_DEBT_ACTION_BOOST" != "0" ] && info "                   --service_debt_threshold $RUN_SERVICE_DEBT_THRESHOLD --service_debt_action_boost $RUN_SERVICE_DEBT_ACTION_BOOST \\"
+        [ "$RUN_SERVICE_DEBT_REWARD_COEF" != "0" ] && info "                   --service_debt_reward_coef $RUN_SERVICE_DEBT_REWARD_COEF --service_debt_max_frames $RUN_SERVICE_DEBT_MAX_FRAMES \\"
+        [ "$RUN_SERVICE_DEBT_REQUEST_BUDGET" != "0" ] && info "                   --service_debt_request_budget $RUN_SERVICE_DEBT_REQUEST_BUDGET --service_debt_budget_boost $RUN_SERVICE_DEBT_BUDGET_BOOST \\"
         info "                   --metrics_flush_every $METRICS_FLUSH_EVERY --sim_log_mode $SIM_LOG_MODE \\"
         [ -n "$IDLE_QUEUE_PENALTY" ] && info "                   --idle_queue_penalty $IDLE_QUEUE_PENALTY \\"
         [ -n "$SAVE_EVERY" ] && info "                   --save_every $SAVE_EVERY \\"
@@ -255,6 +279,13 @@ run_one() {
     local MASK_ARGS=()
     [ "$ACTION_MASK" != "none" ] && MASK_ARGS=(--action_mask "$ACTION_MASK")
     [ "$ACTION_INIT_PROB" != "0.5" ] && MASK_ARGS+=(--action_init_prob "$ACTION_INIT_PROB")
+    local DEBT_ARGS=()
+    [ "$RUN_SERVICE_DEBT_ACTION_BOOST" != "0" ] && DEBT_ARGS+=(--service_debt_threshold "$RUN_SERVICE_DEBT_THRESHOLD")
+    [ "$RUN_SERVICE_DEBT_ACTION_BOOST" != "0" ] && DEBT_ARGS+=(--service_debt_action_boost "$RUN_SERVICE_DEBT_ACTION_BOOST")
+    [ "$RUN_SERVICE_DEBT_REWARD_COEF" != "0" ] && DEBT_ARGS+=(--service_debt_reward_coef "$RUN_SERVICE_DEBT_REWARD_COEF")
+    [ "$RUN_SERVICE_DEBT_REWARD_COEF" != "0" ] && DEBT_ARGS+=(--service_debt_max_frames "$RUN_SERVICE_DEBT_MAX_FRAMES")
+    [ "$RUN_SERVICE_DEBT_REQUEST_BUDGET" != "0" ] && DEBT_ARGS+=(--service_debt_request_budget "$RUN_SERVICE_DEBT_REQUEST_BUDGET")
+    [ "$RUN_SERVICE_DEBT_REQUEST_BUDGET" != "0" ] && DEBT_ARGS+=(--service_debt_budget_boost "$RUN_SERVICE_DEBT_BUDGET_BOOST")
     local STARVATION_ARGS=()
     [ -n "$STARVATION_PENALTY_COEF" ] && STARVATION_ARGS+=(--starvation_penalty_coef "$STARVATION_PENALTY_COEF")
     [ -n "$STARVATION_THRESHOLD" ] && STARVATION_ARGS+=(--starvation_threshold "$STARVATION_THRESHOLD")
@@ -313,6 +344,7 @@ run_one() {
         "${MOBILITY_ARGS[@]}" \
         --heur_deviation_coef "$HDEV" \
         "${MASK_ARGS[@]}" \
+        "${DEBT_ARGS[@]}" \
         "${IDLE_ARGS[@]}" \
         "${STARVATION_ARGS[@]}" \
         "${SAVE_ARGS[@]}" \

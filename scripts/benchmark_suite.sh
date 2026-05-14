@@ -27,6 +27,12 @@ SIM_TIME="15000"
 NUM_SLOTS=10
 HEUR_COEF="0.01"
 IDLE_QUEUE_PENALTY=""
+SERVICE_DEBT_THRESHOLD=""
+SERVICE_DEBT_ACTION_BOOST=""
+SERVICE_DEBT_REWARD_COEF=""
+SERVICE_DEBT_MAX_FRAMES=""
+SERVICE_DEBT_REQUEST_BUDGET=""
+SERVICE_DEBT_BUDGET_BOOST=""
 METRICS_MODE="summary"
 METRICS_FLUSH_EVERY="200"
 SIM_LOG_MODE="file"
@@ -54,6 +60,12 @@ while [[ $# -gt 0 ]]; do
         --num_slots) NUM_SLOTS="$2"; shift 2 ;;
         --heur_coef) HEUR_COEF="$2"; shift 2 ;;
         --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
+        --service_debt_threshold) SERVICE_DEBT_THRESHOLD="$2"; shift 2 ;;
+        --service_debt_action_boost) SERVICE_DEBT_ACTION_BOOST="$2"; shift 2 ;;
+        --service_debt_reward_coef) SERVICE_DEBT_REWARD_COEF="$2"; shift 2 ;;
+        --service_debt_max_frames) SERVICE_DEBT_MAX_FRAMES="$2"; shift 2 ;;
+        --service_debt_request_budget) SERVICE_DEBT_REQUEST_BUDGET="$2"; shift 2 ;;
+        --service_debt_budget_boost) SERVICE_DEBT_BUDGET_BOOST="$2"; shift 2 ;;
         --starvation_penalty_coef) STARVATION_PENALTY_COEF="$2"; shift 2 ;;
         --starvation_threshold) STARVATION_THRESHOLD="$2"; shift 2 ;;
         --starvation_penalty_max_frames) STARVATION_PENALTY_MAX_FRAMES="$2"; shift 2 ;;
@@ -249,6 +261,12 @@ printf 'scenario\tmethod\tseed\tlog_dir\timplementation\tnetwork\trunner\tmacMod
     printf 'num_slots\t%s\n' "$NUM_SLOTS"
     printf 'heur_coef\t%s\n' "$HEUR_COEF"
     printf 'idle_queue_penalty\t%s\n' "$IDLE_QUEUE_PENALTY"
+    printf 'service_debt_threshold\t%s\n' "$SERVICE_DEBT_THRESHOLD"
+    printf 'service_debt_action_boost\t%s\n' "$SERVICE_DEBT_ACTION_BOOST"
+    printf 'service_debt_reward_coef\t%s\n' "$SERVICE_DEBT_REWARD_COEF"
+    printf 'service_debt_max_frames\t%s\n' "$SERVICE_DEBT_MAX_FRAMES"
+    printf 'service_debt_request_budget\t%s\n' "$SERVICE_DEBT_REQUEST_BUDGET"
+    printf 'service_debt_budget_boost\t%s\n' "$SERVICE_DEBT_BUDGET_BOOST"
     printf 'starvation_penalty_coef\t%s\n' "$STARVATION_PENALTY_COEF"
     printf 'starvation_threshold\t%s\n' "$STARVATION_THRESHOLD"
     printf 'starvation_penalty_max_frames\t%s\n' "$STARVATION_PENALTY_MAX_FRAMES"
@@ -318,6 +336,12 @@ for scenario in $SCENARIOS; do
                 [ -n "$TARGET_UPDATES" ] && args+=(--target_updates "$TARGET_UPDATES")
                 [ -n "$TARGET_FRAMES" ] && args+=(--target_frames "$TARGET_FRAMES")
                 [ -n "$IDLE_QUEUE_PENALTY" ] && args+=(--idle_queue_penalty "$IDLE_QUEUE_PENALTY")
+                [ -n "$SERVICE_DEBT_THRESHOLD" ] && args+=(--service_debt_threshold "$SERVICE_DEBT_THRESHOLD")
+                [ -n "$SERVICE_DEBT_ACTION_BOOST" ] && args+=(--service_debt_action_boost "$SERVICE_DEBT_ACTION_BOOST")
+                [ -n "$SERVICE_DEBT_REWARD_COEF" ] && args+=(--service_debt_reward_coef "$SERVICE_DEBT_REWARD_COEF")
+                [ -n "$SERVICE_DEBT_MAX_FRAMES" ] && args+=(--service_debt_max_frames "$SERVICE_DEBT_MAX_FRAMES")
+                [ -n "$SERVICE_DEBT_REQUEST_BUDGET" ] && args+=(--service_debt_request_budget "$SERVICE_DEBT_REQUEST_BUDGET")
+                [ -n "$SERVICE_DEBT_BUDGET_BOOST" ] && args+=(--service_debt_budget_boost "$SERVICE_DEBT_BUDGET_BOOST")
                 [ -n "$STARVATION_PENALTY_COEF" ] && args+=(--starvation_penalty_coef "$STARVATION_PENALTY_COEF")
                 [ -n "$STARVATION_THRESHOLD" ] && args+=(--starvation_threshold "$STARVATION_THRESHOLD")
                 [ -n "$STARVATION_PENALTY_MAX_FRAMES" ] && args+=(--starvation_penalty_max_frames "$STARVATION_PENALTY_MAX_FRAMES")
