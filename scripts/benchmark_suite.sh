@@ -402,7 +402,7 @@ for scenario in $SCENARIOS; do
 done
 
 if [ "$DRY_RUN" = false ]; then
-    python "$SCRIPT_DIR/summarize_benchmark.py" "$ROOT_LOG"
+    "${PYTHON:-python3}" "$SCRIPT_DIR/summarize_benchmark.py" "$ROOT_LOG"
 fi
 
 info "完成: $ROOT_LOG"
