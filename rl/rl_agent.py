@@ -40,6 +40,35 @@ from .transformer_model import _parse_bown, _parse_t2hop
 from .rl_receiver import FrameObservation, NodeObservation
 
 
+def compute_action_mask(
+    obs: NodeObservation,
+    num_slots: int,
+    mode: str = "none",
+) -> torch.Tensor:
+    """
+    Return a per-slot action mask where 1.0 means the RL policy may request the
+    slot and 0.0 means the action is structurally unsafe.
+
+    `twohop` mirrors the conservative STDMA baseline: slots occupied by one-hop
+    or two-hop neighbors in the previous observation are masked out. Slots used
+    by this node or by farther nodes remain available.
+    """
+    if mode in ("", "none", None):
+        return torch.ones(num_slots, dtype=torch.float32)
+    if mode != "twohop":
+        raise ValueError(f"unsupported action_mask mode: {mode}")
+
+    t2hop = _parse_t2hop(obs.T2hop, num_slots)
+    mask = torch.ones(num_slots, dtype=torch.float32)
+    for slot in range(num_slots):
+        occupied = t2hop[2 * slot]
+        min_hop_norm = t2hop[2 * slot + 1]
+        # hop is normalized by /3 in _parse_t2hop; one-hop/two-hop occupancy is unsafe.
+        if occupied >= 0.5 and 0.0 < min_hop_norm <= (2.0 / 3.0 + 1e-6):
+            mask[slot] = 0.0
+    return mask
+
+
 # ---------------------------------------------------------------------------
 # 特征提取：NodeObservation → Tensor
 # ---------------------------------------------------------------------------

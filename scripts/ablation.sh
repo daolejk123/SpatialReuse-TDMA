@@ -199,10 +199,11 @@ printf 'scenario\tgroup\tseed\tlog_dir\ttarget_updates\ttarget_frames\tsim_time\
 # ---- 组 → 参数映射 ----
 group_params() {
     case "$1" in
-        baseline) echo "false 0.0" ;;
-        D)        echo "true  0.0" ;;
-        B)        echo "false ${HEUR_COEF}" ;;
-        DB)       echo "true  ${HEUR_COEF}" ;;
+        baseline) echo "false 0.0 none 0.5" ;;
+        D)        echo "true  0.0 none 0.5" ;;
+        B)        echo "false ${HEUR_COEF} none 0.5" ;;
+        B_masked) echo "false ${HEUR_COEF} twohop 0.75" ;;
+        DB)       echo "true  ${HEUR_COEF} none 0.5" ;;
         *) error "未知实验组: $1"; return 1 ;;
     esac
 }
@@ -210,7 +211,7 @@ group_params() {
 # ---- 单次运行 ----
 run_one() {
     local group=$1 seed=$2
-    read -r ADAPTIVE HDEV <<< "$(group_params "$group")"
+    read -r ADAPTIVE HDEV ACTION_MASK ACTION_INIT_PROB <<< "$(group_params "$group")"
 
     local LOG_DIR="$ROOT_LOG/${group}/seed${seed}"
     mkdir -p "$LOG_DIR"
@@ -218,7 +219,7 @@ run_one() {
         "${SCENARIO_NAME:-}" "$group" "$seed" "$LOG_DIR" \
         "$TARGET_UPDATES" "$TARGET_FRAMES" "$SIM_TIME" >> "$MANIFEST"
 
-    section "[${group} / seed=${seed}] adaptive=${ADAPTIVE}, heur_coef=${HDEV}"
+    section "[${group} / seed=${seed}] adaptive=${ADAPTIVE}, heur_coef=${HDEV}, action_mask=${ACTION_MASK}, action_init_prob=${ACTION_INIT_PROB}"
 
     if [ "$DRY_RUN" = true ]; then
         info "[DRY] run_joint.sh --num_slots $NUM_SLOTS --num_nodes $NUM_NODES \\"
@@ -231,6 +232,8 @@ run_one() {
         [ -n "$DYNAMIC_TOPOLOGY_MODE" ] && info "                   --dynamic_topology_mode $DYNAMIC_TOPOLOGY_MODE \\"
         [ -n "$LOGICAL_TOPOLOGY_MODE" ] && info "                   --logical_topology_mode $LOGICAL_TOPOLOGY_MODE \\"
         info "                   --heur_deviation_coef $HDEV --metrics_mode $METRICS_MODE \\"
+        [ "$ACTION_MASK" != "none" ] && info "                   --action_mask $ACTION_MASK \\"
+        [ "$ACTION_INIT_PROB" != "0.5" ] && info "                   --action_init_prob $ACTION_INIT_PROB \\"
         info "                   --metrics_flush_every $METRICS_FLUSH_EVERY --sim_log_mode $SIM_LOG_MODE \\"
         [ -n "$IDLE_QUEUE_PENALTY" ] && info "                   --idle_queue_penalty $IDLE_QUEUE_PENALTY \\"
         [ -n "$SAVE_EVERY" ] && info "                   --save_every $SAVE_EVERY \\"
@@ -249,6 +252,9 @@ run_one() {
     local T0=$(date +%s)
     local IDLE_ARGS=()
     [ -n "$IDLE_QUEUE_PENALTY" ] && IDLE_ARGS=(--idle_queue_penalty "$IDLE_QUEUE_PENALTY")
+    local MASK_ARGS=()
+    [ "$ACTION_MASK" != "none" ] && MASK_ARGS=(--action_mask "$ACTION_MASK")
+    [ "$ACTION_INIT_PROB" != "0.5" ] && MASK_ARGS+=(--action_init_prob "$ACTION_INIT_PROB")
     local STARVATION_ARGS=()
     [ -n "$STARVATION_PENALTY_COEF" ] && STARVATION_ARGS+=(--starvation_penalty_coef "$STARVATION_PENALTY_COEF")
     [ -n "$STARVATION_THRESHOLD" ] && STARVATION_ARGS+=(--starvation_threshold "$STARVATION_THRESHOLD")
@@ -306,6 +312,7 @@ run_one() {
         "${DYNAMIC_ARGS[@]}" \
         "${MOBILITY_ARGS[@]}" \
         --heur_deviation_coef "$HDEV" \
+        "${MASK_ARGS[@]}" \
         "${IDLE_ARGS[@]}" \
         "${STARVATION_ARGS[@]}" \
         "${SAVE_ARGS[@]}" \
@@ -391,7 +398,7 @@ done
 section "全部消融完成"
 info "结果根目录: $ROOT_LOG"
 if [ "$DRY_RUN" = false ] && [ -f "$SCRIPT_DIR/monitor_runs.py" ]; then
-    python "$SCRIPT_DIR/monitor_runs.py" "$ROOT_LOG" --once || true
+    "${PYTHON:-python3}" "$SCRIPT_DIR/monitor_runs.py" "$ROOT_LOG" --once || true
 fi
 info "下一步：用 rl 日志解析脚本汇总各组 avg_r / entropy / heur_dev 平均值"
 [ "$FAILED" -eq 0 ] || exit 1

@@ -32,7 +32,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from .rl_agent import TDMAAgent, RLFeatureExtractor, compute_reward, compute_per_slot_reward
+from .rl_agent import (
+    TDMAAgent,
+    RLFeatureExtractor,
+    compute_action_mask,
+    compute_reward,
+    compute_per_slot_reward,
+)
 from .rl_receiver import connect, ActionSender, FrameObservation, NodeObservation
 
 
@@ -63,6 +69,13 @@ class PPOConfig:
     # 方向 B：KL-to-Heuristic 软正则（α 偏离 0.5 的代价），0.0 = 禁用
     # 建议消融值 0.005 ~ 0.02；防止 RL 在本可用启发式的稳定时隙盲目偏离
     heur_deviation_coef: float = 0.0
+
+    # 动作 mask：none=原 PPO；twohop=屏蔽一跳/两跳邻居上一帧占用的 slot
+    action_mask: str = "none"
+
+    # Actor 初始申请概率。默认 0.5 对应旧行为；masked STDMA 先验可用 0.75
+    # 让安全槽更积极申请，再由 PPO 微调。
+    action_init_prob: float = 0.5
 
     # 有队列但未申请的轻量惩罚，0.0 = 禁用（保持旧 reward 完全一致）
     idle_queue_penalty: float = 0.0
@@ -121,6 +134,7 @@ class NodeTransition:
     feat_seq:  torch.Tensor   # (T, input_dim)  输入给网络的序列
     action:    torch.Tensor   # (M,)             实际执行的二值动作
     log_prob:  torch.Tensor   # (M,)             各维度 log π(a|s)
+    action_mask: torch.Tensor # (M,)             训练时使用的动作 mask
     value:     torch.Tensor   # (M,)             逐时隙价值 V_s(t)
     reward:    torch.Tensor   # (M,)             逐时隙奖励 r_s
     advantage: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0))  # (M,) GAE
@@ -150,7 +164,7 @@ class RolloutBuffer:
 
     def get_tensors(self, device: torch.device):
         """将所有节点的转移打平为训练所需张量（逐时隙）。"""
-        feat_seqs, actions, log_probs_old = [], [], []
+        feat_seqs, actions, log_probs_old, action_masks = [], [], [], []
         advantages, returns = [], []
 
         for traj in self._buf.values():
@@ -158,6 +172,7 @@ class RolloutBuffer:
                 feat_seqs.append(tr.feat_seq)
                 actions.append(tr.action)
                 log_probs_old.append(tr.log_prob)
+                action_masks.append(tr.action_mask)
                 advantages.append(tr.advantage)
                 returns.append(tr.ret)
 
@@ -165,6 +180,7 @@ class RolloutBuffer:
             torch.stack(feat_seqs).to(device),       # (N, T, d)
             torch.stack(actions).to(device),          # (N, M)
             torch.stack(log_probs_old).to(device),    # (N, M)
+            torch.stack(action_masks).to(device),      # (N, M)
             torch.stack(advantages).to(device),       # (N, M) 逐时隙
             torch.stack(returns).to(device),          # (N, M) 逐时隙
         )
@@ -192,7 +208,7 @@ def ppo_update(
     使用缓冲区中的轨迹执行 cfg.ppo_epochs 轮梯度更新。
     返回各损失的均值（用于日志）。
     """
-    feat_seqs, actions, log_probs_old, advantages, returns = buffer.get_tensors(device)
+    feat_seqs, actions, log_probs_old, action_masks, advantages, returns = buffer.get_tensors(device)
     # advantages: (N, M), returns: (N, M)
 
     # 标准化 advantage（全局，跨样本和时隙）
@@ -206,11 +222,18 @@ def ppo_update(
     for _ in range(cfg.ppo_epochs):
         # 前向（不带持久隐状态，梯度更新时重置）
         probs, values, _ = net(feat_seqs)           # (N, M), (N, M)
+        if cfg.action_mask != "none":
+            probs = torch.where(action_masks > 0.5, probs, torch.zeros_like(probs))
+            valid_mask = action_masks
+        else:
+            valid_mask = torch.ones_like(actions)
+        valid_count = valid_mask.sum().clamp_min(1.0)
+        probs = probs.clamp(1e-6, 1.0 - 1e-6)
 
         # log π(a|s)：M 个独立伯努利分布
         dist = torch.distributions.Bernoulli(probs=probs)
         log_probs = dist.log_prob(actions)         # (N, M)
-        entropy   = dist.entropy().mean()          # 标量
+        entropy   = (dist.entropy() * valid_mask).sum() / valid_count
 
         # 逐时隙 PPO ratio（不再求和，每个时隙独立）
         ratio = torch.exp(log_probs - log_probs_old)  # (N, M)
@@ -218,16 +241,18 @@ def ppo_update(
         # 逐时隙 Clipped surrogate objective
         surr1 = ratio * advantages                                          # (N, M)
         surr2 = torch.clamp(ratio, 1 - cfg.clip_eps, 1 + cfg.clip_eps) * advantages
-        actor_loss  = -torch.min(surr1, surr2).mean()  # 对 N 和 M 取均值
+        actor_loss  = -(torch.min(surr1, surr2) * valid_mask).sum() / valid_count
 
         # 逐时隙 Critic MSE
-        critic_loss = nn.functional.mse_loss(values, returns_norm)
+        critic_loss = (
+            nn.functional.mse_loss(values, returns_norm, reduction="none") * valid_mask
+        ).sum() / valid_count
 
         loss = actor_loss + cfg.vf_coef * critic_loss - cfg.ent_coef * entropy
 
         # 方向 B：α 远离 0.5 的软正则（KL-to-Heuristic 简化版）
         if cfg.heur_deviation_coef > 0:
-            heur_dev = ((probs - 0.5) ** 2).mean()
+            heur_dev = (((probs - 0.5) ** 2) * valid_mask).sum() / valid_count
             loss = loss + cfg.heur_deviation_coef * heur_dev
             stats["heur_dev"].append(heur_dev.item())
 
@@ -466,6 +491,11 @@ def train(cfg: PPOConfig):
             lstm1_hidden = cfg.lstm1_hidden,
             device       = cfg.device,
         )
+        if cfg.action_init_prob != 0.5:
+            init_p = min(0.99, max(0.01, cfg.action_init_prob))
+            init_logit = float(np.log(init_p / (1.0 - init_p)))
+            with torch.no_grad():
+                ag.net.actor_head.bias.fill_(init_logit)
         opt = optim.Adam(ag.net.parameters(), lr=cfg.lr)
         sch = optim.lr_scheduler.ExponentialLR(opt, gamma=cfg.lr_decay_gamma)
         agents[nid]     = ag
@@ -510,6 +540,8 @@ def train(cfg: PPOConfig):
     print(f"[PPO] 开始训练  num_slots={cfg.num_slots} num_nodes={cfg.num_nodes}")
     print(f"[PPO] 独立 Agent 模式：每节点独立网络 × {cfg.num_nodes}")
     print(f"[PPO] update_every={cfg.update_every}  ppo_epochs={cfg.ppo_epochs}  lr={cfg.lr}")
+    print(f"[PPO] action_mask={cfg.action_mask}")
+    print(f"[PPO] action_init_prob={cfg.action_init_prob}")
     print(f"[PPO] 等待仿真连接 {cfg.pipe_path} ...")
 
     try:
@@ -525,6 +557,7 @@ def train(cfg: PPOConfig):
                 # ── 1. 推理：每节点使用自己的 Agent ──────────────────────
                 node_probs: Dict[int, np.ndarray]  = {}
                 node_values: Dict[int, np.ndarray] = {}  # 逐时隙价值 (M,)
+                node_masks: Dict[int, torch.Tensor] = {}
 
                 for nid, obs in frame_obs.nodes.items():
                     ag = agents[nid]
@@ -550,8 +583,18 @@ def train(cfg: PPOConfig):
                     )
                     window.append(feat)
 
-                    node_probs[nid]  = probs_t[0].cpu().numpy()
+                    mask_t = compute_action_mask(obs, cfg.num_slots, cfg.action_mask)
+                    probs_exec = probs_t[0].cpu()
+                    if cfg.action_mask != "none":
+                        probs_exec = torch.where(
+                            mask_t > 0.5,
+                            probs_exec,
+                            torch.zeros_like(probs_exec),
+                        )
+
+                    node_probs[nid]  = probs_exec.numpy()
                     node_values[nid] = values_t[0].cpu().numpy()    # (M,)
+                    node_masks[nid] = mask_t
 
                 # ── 2. 采样动作（因子化伯努利）─────────────────────────
                 node_actions: Dict[int, np.ndarray] = {
@@ -614,7 +657,7 @@ def train(cfg: PPOConfig):
                     probs_np = node_probs[nid]
                     act_np   = node_actions[nid]
 
-                    probs_t  = torch.tensor(probs_np, dtype=torch.float32)
+                    probs_t  = torch.tensor(probs_np, dtype=torch.float32).clamp(1e-6, 1.0 - 1e-6)
                     act_t    = torch.tensor(act_np,   dtype=torch.float32)
                     log_prob = (
                         act_t * torch.log(probs_t + 1e-8)
@@ -630,6 +673,7 @@ def train(cfg: PPOConfig):
                         feat_seq  = feat_seq,
                         action    = act_t,
                         log_prob  = log_prob,
+                        action_mask = node_masks[nid],
                         value     = torch.tensor(node_values[nid], dtype=torch.float32),  # (M,)
                         reward    = torch.zeros(cfg.num_slots),   # 占位，下一帧填充
                     )
@@ -767,6 +811,10 @@ def _parse_args() -> PPOConfig:
                    help="同步写超时（秒），超时后继续训练不阻塞")
     p.add_argument("--heur_deviation_coef", type=float, default=0.0,
                    help="方向B: α 偏离 0.5 的软正则系数（0=禁用，建议 0.005~0.02）")
+    p.add_argument("--action_mask", type=str, default="none", choices=("none", "twohop"),
+                   help="动作 mask：none=原始 PPO，twohop=屏蔽一跳/两跳不安全 slot")
+    p.add_argument("--action_init_prob", type=float, default=0.5,
+                   help="Actor 初始申请概率（默认 0.5；masked STDMA 先验可用 0.75）")
     p.add_argument("--idle_queue_penalty", type=float, default=0.0,
                    help="有队列但未申请时隙的轻量惩罚（0=禁用，建议 0.05）")
     p.add_argument("--starvation_threshold", type=int, default=5,
