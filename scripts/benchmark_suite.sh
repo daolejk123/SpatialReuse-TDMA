@@ -92,6 +92,7 @@ while [[ $# -gt 0 ]]; do
         --service_debt_queue_delta_target) SERVICE_DEBT_QUEUE_DELTA_TARGET="$2"; shift 2 ;;
         --service_debt_budget_success_gain) SERVICE_DEBT_BUDGET_SUCCESS_GAIN="$2"; shift 2 ;;
         --service_debt_budget_queue_gain) SERVICE_DEBT_BUDGET_QUEUE_GAIN="$2"; shift 2 ;;
+        --service_debt_wt_threshold) SERVICE_DEBT_WT_THRESHOLD="$2"; shift 2 ;;
         --starvation_penalty_coef) STARVATION_PENALTY_COEF="$2"; shift 2 ;;
         --starvation_threshold) STARVATION_THRESHOLD="$2"; shift 2 ;;
         --starvation_penalty_max_frames) STARVATION_PENALTY_MAX_FRAMES="$2"; shift 2 ;;
@@ -164,14 +165,19 @@ parse_scenario() {
     SCENARIO_N="${BASH_REMATCH[1]}"
     SCENARIO_TOPOLOGY="${BASH_REMATCH[2]}"
     SCENARIO_SUFFIX="${BASH_REMATCH[3]}"
-    case "$SCENARIO_SUFFIX" in
-        "" ) ;;
-        _load_low) SCENARIO_LOAD_ARGS=(--traffic_rate 1.0) ;;
-        _load_medium) SCENARIO_LOAD_ARGS=(--traffic_rate 5.0) ;;
-        _load_high) SCENARIO_LOAD_ARGS=(--traffic_rate 10.0) ;;
-        _load_overload) SCENARIO_LOAD_ARGS=(--traffic_rate 20.0) ;;
-        _ramp) SCENARIO_LOAD_ARGS=(--enable_ramp_traffic true) ;;
-        _adaptive) SCENARIO_LOAD_ARGS=(--enable_adaptive_traffic true) ;;
+
+    local mobility_match=""
+    local remaining_suffix="$SCENARIO_SUFFIX"
+    for mob in _manet_uav_sparse200 _manet_uav_sparse _manet_uav _manet_vehicular _manet_pedestrian _manet_dense _manet_sparse _manet; do
+        if [[ "$SCENARIO_SUFFIX" == "$mob" || "$SCENARIO_SUFFIX" == "$mob"_* ]]; then
+            mobility_match="$mob"
+            remaining_suffix="${SCENARIO_SUFFIX#$mob}"
+            break
+        fi
+    done
+
+    case "$mobility_match" in
+        "") ;;
         _manet|_manet_pedestrian)
             SCENARIO_MOBILITY_ARGS=(--mobility_mode random_waypoint --link_model distance \
                 --arena_width 500 --arena_height 500 --comm_range 150 \
@@ -207,6 +213,16 @@ parse_scenario() {
                 --arena_width 800 --arena_height 800 --comm_range 150 \
                 --mobility_speed_min 1 --mobility_speed_max 3 --mobility_pause_max 5)
             ;;
+    esac
+
+    case "$remaining_suffix" in
+        "" ) ;;
+        _load_low) SCENARIO_LOAD_ARGS=(--traffic_rate 1.0) ;;
+        _load_medium) SCENARIO_LOAD_ARGS=(--traffic_rate 5.0) ;;
+        _load_high) SCENARIO_LOAD_ARGS=(--traffic_rate 10.0) ;;
+        _load_overload) SCENARIO_LOAD_ARGS=(--traffic_rate 20.0) ;;
+        _ramp) SCENARIO_LOAD_ARGS=(--enable_ramp_traffic true) ;;
+        _adaptive) SCENARIO_LOAD_ARGS=(--enable_adaptive_traffic true) ;;
         _edge_toggle)
             SCENARIO_DYNAMIC_MODE="edge_toggle"
             SCENARIO_PHYSICAL_TOPOLOGY="full"
@@ -238,7 +254,7 @@ parse_scenario() {
             SCENARIO_DYNAMIC_ARGS=(--dynamic_topology_mode edge_toggle --logical_topology_mode "$SCENARIO_TOPOLOGY" --edge_toggle_ratio 0.4)
             ;;
         *)
-            echo "[BENCH] 不支持的场景后缀: $SCENARIO_SUFFIX（当前支持 load/ramp/adaptive 与动态拓扑场景）" >&2
+            echo "[BENCH] 不支持的场景后缀: $SCENARIO_SUFFIX（mobility='$mobility_match' remaining='$remaining_suffix'；当前支持 load/ramp/adaptive 与动态拓扑场景）" >&2
             exit 1
             ;;
     esac
@@ -306,6 +322,7 @@ printf 'scenario\tmethod\tseed\tlog_dir\timplementation\tnetwork\trunner\tmacMod
     printf 'service_debt_queue_delta_target\t%s\n' "$SERVICE_DEBT_QUEUE_DELTA_TARGET"
     printf 'service_debt_budget_success_gain\t%s\n' "$SERVICE_DEBT_BUDGET_SUCCESS_GAIN"
     printf 'service_debt_budget_queue_gain\t%s\n' "$SERVICE_DEBT_BUDGET_QUEUE_GAIN"
+    printf 'service_debt_wt_threshold\t%s\n' "$SERVICE_DEBT_WT_THRESHOLD"
     printf 'starvation_penalty_coef\t%s\n' "$STARVATION_PENALTY_COEF"
     printf 'starvation_threshold\t%s\n' "$STARVATION_THRESHOLD"
     printf 'starvation_penalty_max_frames\t%s\n' "$STARVATION_PENALTY_MAX_FRAMES"
@@ -394,6 +411,7 @@ for scenario in $SCENARIOS; do
                 [ -n "$SERVICE_DEBT_QUEUE_DELTA_TARGET" ] && args+=(--service_debt_queue_delta_target "$SERVICE_DEBT_QUEUE_DELTA_TARGET")
                 [ -n "$SERVICE_DEBT_BUDGET_SUCCESS_GAIN" ] && args+=(--service_debt_budget_success_gain "$SERVICE_DEBT_BUDGET_SUCCESS_GAIN")
                 [ -n "$SERVICE_DEBT_BUDGET_QUEUE_GAIN" ] && args+=(--service_debt_budget_queue_gain "$SERVICE_DEBT_BUDGET_QUEUE_GAIN")
+                [ -n "$SERVICE_DEBT_WT_THRESHOLD" ] && args+=(--service_debt_wt_threshold "$SERVICE_DEBT_WT_THRESHOLD")
                 [ -n "$STARVATION_PENALTY_COEF" ] && args+=(--starvation_penalty_coef "$STARVATION_PENALTY_COEF")
                 [ -n "$STARVATION_THRESHOLD" ] && args+=(--starvation_threshold "$STARVATION_THRESHOLD")
                 [ -n "$STARVATION_PENALTY_MAX_FRAMES" ] && args+=(--starvation_penalty_max_frames "$STARVATION_PENALTY_MAX_FRAMES")

@@ -112,6 +112,7 @@ while [[ $# -gt 0 ]]; do
         --service_debt_queue_delta_target) SERVICE_DEBT_QUEUE_DELTA_TARGET="$2"; shift 2 ;;
         --service_debt_budget_success_gain) SERVICE_DEBT_BUDGET_SUCCESS_GAIN="$2"; shift 2 ;;
         --service_debt_budget_queue_gain) SERVICE_DEBT_BUDGET_QUEUE_GAIN="$2"; shift 2 ;;
+        --service_debt_wt_threshold) SERVICE_DEBT_WT_THRESHOLD="$2"; shift 2 ;;
         --starvation_penalty_coef) STARVATION_PENALTY_COEF="$2"; shift 2 ;;
         --starvation_threshold) STARVATION_THRESHOLD="$2"; shift 2 ;;
         --starvation_penalty_max_frames) STARVATION_PENALTY_MAX_FRAMES="$2"; shift 2 ;;
@@ -338,6 +339,7 @@ run_one() {
     [ -n "$SERVICE_DEBT_QUEUE_DELTA_TARGET" ] && DEBT_ARGS+=(--service_debt_queue_delta_target "$SERVICE_DEBT_QUEUE_DELTA_TARGET")
     [ -n "$SERVICE_DEBT_BUDGET_SUCCESS_GAIN" ] && DEBT_ARGS+=(--service_debt_budget_success_gain "$SERVICE_DEBT_BUDGET_SUCCESS_GAIN")
     [ -n "$SERVICE_DEBT_BUDGET_QUEUE_GAIN" ] && DEBT_ARGS+=(--service_debt_budget_queue_gain "$SERVICE_DEBT_BUDGET_QUEUE_GAIN")
+    [ -n "$SERVICE_DEBT_WT_THRESHOLD" ] && DEBT_ARGS+=(--service_debt_wt_threshold "$SERVICE_DEBT_WT_THRESHOLD")
     local STARVATION_ARGS=()
     [ -n "$STARVATION_PENALTY_COEF" ] && STARVATION_ARGS+=(--starvation_penalty_coef "$STARVATION_PENALTY_COEF")
     [ -n "$STARVATION_THRESHOLD" ] && STARVATION_ARGS+=(--starvation_threshold "$STARVATION_THRESHOLD")

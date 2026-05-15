@@ -100,6 +100,10 @@ class PPOConfig:
     service_debt_queue_delta_target: float = 1.0
     service_debt_budget_success_gain: float = 0.50
     service_debt_budget_queue_gain: float = 0.25
+    # Wt（队首等待时间，秒）软闸门：obs.Wt 低于该阈值时不触发服务债务，
+    # 避免在轻量扰动下因 frames_since_tx 偶发性偏高而过度激发申请。
+    # 0.0 = 禁用（保持向后兼容）；典型值 3000~6000，配合 N12 pedestrian。
+    service_debt_wt_threshold: float = 0.0
 
     # 饥饿惩罚（改进 19，2026-05-10）：连续 N 帧未发包后对'0'时隙施加递增惩罚
     # 0.0 = 禁用；正常使用 0.05~0.20，太大会让策略无脑申请导致碰撞激增
@@ -236,6 +240,10 @@ def _service_debt_level(obs: NodeObservation, frames_since_tx: int, cfg: PPOConf
         or frames_since_tx <= cfg.service_debt_threshold
     ):
         return 0.0
+    if cfg.service_debt_wt_threshold > 0.0:
+        wt = float(getattr(obs, "Wt", 0.0) or 0.0)
+        if wt < cfg.service_debt_wt_threshold:
+            return 0.0
     return min(
         1.0,
         (frames_since_tx - cfg.service_debt_threshold) / cfg.service_debt_max_frames,
@@ -753,7 +761,8 @@ def train(cfg: PPOConfig):
         f"request_budget={cfg.service_debt_request_budget}, "
         f"budget_boost={cfg.service_debt_budget_boost}, "
         f"density_adaptive={cfg.service_debt_density_adaptive}, "
-        f"dynamic_budget={cfg.service_debt_dynamic_budget}"
+        f"dynamic_budget={cfg.service_debt_dynamic_budget}, "
+        f"wt_threshold={cfg.service_debt_wt_threshold}"
     )
     print(f"[PPO] 等待仿真连接 {cfg.pipe_path} ...")
 
@@ -1163,6 +1172,9 @@ def _parse_args() -> PPOConfig:
                    help="申请成功率低于目标时的预算收缩强度")
     p.add_argument("--service_debt_budget_queue_gain", type=float, default=0.25,
                    help="队列增长高于目标时的预算收缩强度")
+    p.add_argument("--service_debt_wt_threshold", type=float, default=0.0,
+                   help="Wt 软闸门：obs.Wt 低于该值时不触发 service_debt，"
+                        "避免轻扰动下过度激发（0=禁用，典型 3000~6000）")
     p.add_argument("--starvation_threshold", type=int, default=5,
                    help="饥饿惩罚启动阈值：超过 N 帧未成功发包后开始惩罚（默认 5）")
     p.add_argument("--starvation_penalty_coef", type=float, default=0.0,

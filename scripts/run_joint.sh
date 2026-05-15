@@ -226,6 +226,7 @@ while [[ $# -gt 0 ]]; do
         --service_debt_queue_delta_target) SERVICE_DEBT_QUEUE_DELTA_TARGET="$2"; shift 2 ;;
         --service_debt_budget_success_gain) SERVICE_DEBT_BUDGET_SUCCESS_GAIN="$2"; shift 2 ;;
         --service_debt_budget_queue_gain) SERVICE_DEBT_BUDGET_QUEUE_GAIN="$2"; shift 2 ;;
+        --service_debt_wt_threshold) SERVICE_DEBT_WT_THRESHOLD="$2"; shift 2 ;;
         --idle_queue_penalty) IDLE_QUEUE_PENALTY="$2"; shift 2 ;;
         --starvation_penalty_coef) STARVATION_PENALTY_COEF="$2"; shift 2 ;;
         --starvation_threshold) STARVATION_THRESHOLD="$2"; shift 2 ;;
@@ -783,6 +784,7 @@ PPO_CMD=(
 [ -n "$SERVICE_DEBT_QUEUE_DELTA_TARGET" ] && PPO_CMD+=(--service_debt_queue_delta_target "$SERVICE_DEBT_QUEUE_DELTA_TARGET")
 [ -n "$SERVICE_DEBT_BUDGET_SUCCESS_GAIN" ] && PPO_CMD+=(--service_debt_budget_success_gain "$SERVICE_DEBT_BUDGET_SUCCESS_GAIN")
 [ -n "$SERVICE_DEBT_BUDGET_QUEUE_GAIN" ] && PPO_CMD+=(--service_debt_budget_queue_gain "$SERVICE_DEBT_BUDGET_QUEUE_GAIN")
+[ -n "$SERVICE_DEBT_WT_THRESHOLD" ] && PPO_CMD+=(--service_debt_wt_threshold "$SERVICE_DEBT_WT_THRESHOLD")
 [ -n "$IDLE_QUEUE_PENALTY" ] && PPO_CMD+=(--idle_queue_penalty "$IDLE_QUEUE_PENALTY")
 [ -n "$STARVATION_PENALTY_COEF" ] && PPO_CMD+=(--starvation_penalty_coef "$STARVATION_PENALTY_COEF")
 [ -n "$STARVATION_THRESHOLD" ] && PPO_CMD+=(--starvation_threshold "$STARVATION_THRESHOLD")
