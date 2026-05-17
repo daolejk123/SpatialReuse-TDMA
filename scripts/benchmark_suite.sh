@@ -46,6 +46,34 @@ SERVICE_DEBT_SUCCESS_TARGET=""
 SERVICE_DEBT_QUEUE_DELTA_TARGET=""
 SERVICE_DEBT_BUDGET_SUCCESS_GAIN=""
 SERVICE_DEBT_BUDGET_QUEUE_GAIN=""
+SERVICE_DEBT_WT_THRESHOLD=""
+SERVICE_DEBT_WT_CONTEXT_ADAPTIVE=false
+SERVICE_DEBT_WT_CONTEXT_MIN_SCALE=""
+SERVICE_DEBT_WT_NODE_DEFICIT_TARGET=""
+SERVICE_DEBT_WT_NODE_CHANGE_TARGET=""
+SERVICE_DEBT_WT_EDGE_CHANGE_TARGET=""
+CONSTRAINT_SERVICE_THRESHOLD=""
+CONSTRAINT_SERVICE_COST_RAMP_FRAMES=""
+CONSTRAINT_STARVATION_THRESHOLD=""
+CONSTRAINT_STARVATION_MAX_FRAMES=""
+CONSTRAINT_DEBT_MAX=""
+CONSTRAINT_DEBT_REPAY=""
+CONSTRAINT_SERVICE_COST_LIMIT=""
+CONSTRAINT_STARVATION_COST_LIMIT=""
+CONSTRAINT_COST_AGGREGATION=""
+CONSTRAINT_TAIL_FRACTION=""
+CONSTRAINT_BUDGET_ONLY=false
+CONSTRAINT_BUDGET_ALLOCATION=""
+CONSTRAINT_BUDGET_MIN_SHARE=""
+CONSTRAINT_REPAY_ACTION_SLOTS=""
+CONSTRAINT_REPAY_ACTION_THRESHOLD=""
+CONSTRAINT_REPAY_ACTION_MAX_NODES=""
+CONSTRAINT_REPAY_REWARD_COEF=""
+CONSTRAINT_REPAY_TARGET_PROB=""
+CONSTRAINT_REPAY_TARGET_COEF=""
+CONSTRAINT_LAMBDA_LR=""
+CONSTRAINT_DUAL_MAX=""
+TRAINING_MODE=""
 METRICS_MODE="summary"
 METRICS_FLUSH_EVERY="200"
 SIM_LOG_MODE="file"
@@ -93,6 +121,38 @@ while [[ $# -gt 0 ]]; do
         --service_debt_budget_success_gain) SERVICE_DEBT_BUDGET_SUCCESS_GAIN="$2"; shift 2 ;;
         --service_debt_budget_queue_gain) SERVICE_DEBT_BUDGET_QUEUE_GAIN="$2"; shift 2 ;;
         --service_debt_wt_threshold) SERVICE_DEBT_WT_THRESHOLD="$2"; shift 2 ;;
+        --service_debt_wt_context_adaptive) SERVICE_DEBT_WT_CONTEXT_ADAPTIVE=true; shift ;;
+        --service_debt_wt_context_min_scale) SERVICE_DEBT_WT_CONTEXT_MIN_SCALE="$2"; shift 2 ;;
+        --service_debt_wt_node_deficit_target) SERVICE_DEBT_WT_NODE_DEFICIT_TARGET="$2"; shift 2 ;;
+        --service_debt_wt_node_change_target) SERVICE_DEBT_WT_NODE_CHANGE_TARGET="$2"; shift 2 ;;
+        --service_debt_wt_edge_change_target) SERVICE_DEBT_WT_EDGE_CHANGE_TARGET="$2"; shift 2 ;;
+        --constraint_service_threshold) CONSTRAINT_SERVICE_THRESHOLD="$2"; shift 2 ;;
+        --constraint_service_cost_ramp_frames) CONSTRAINT_SERVICE_COST_RAMP_FRAMES="$2"; shift 2 ;;
+        --constraint_starvation_threshold) CONSTRAINT_STARVATION_THRESHOLD="$2"; shift 2 ;;
+        --constraint_starvation_max_frames) CONSTRAINT_STARVATION_MAX_FRAMES="$2"; shift 2 ;;
+        --constraint_debt_max) CONSTRAINT_DEBT_MAX="$2"; shift 2 ;;
+        --constraint_debt_repay) CONSTRAINT_DEBT_REPAY="$2"; shift 2 ;;
+        --constraint_service_cost_limit) CONSTRAINT_SERVICE_COST_LIMIT="$2"; shift 2 ;;
+        --constraint_starvation_cost_limit) CONSTRAINT_STARVATION_COST_LIMIT="$2"; shift 2 ;;
+        --constraint_cost_aggregation) CONSTRAINT_COST_AGGREGATION="$2"; shift 2 ;;
+        --constraint_tail_fraction) CONSTRAINT_TAIL_FRACTION="$2"; shift 2 ;;
+        --constraint_budget_only) CONSTRAINT_BUDGET_ONLY=true; shift ;;
+        --constraint_budget_allocation) CONSTRAINT_BUDGET_ALLOCATION="$2"; shift 2 ;;
+        --constraint_budget_min_share) CONSTRAINT_BUDGET_MIN_SHARE="$2"; shift 2 ;;
+        --constraint_repay_action_slots) CONSTRAINT_REPAY_ACTION_SLOTS="$2"; shift 2 ;;
+        --constraint_repay_action_threshold) CONSTRAINT_REPAY_ACTION_THRESHOLD="$2"; shift 2 ;;
+        --constraint_repay_action_max_nodes) CONSTRAINT_REPAY_ACTION_MAX_NODES="$2"; shift 2 ;;
+        --constraint_repay_reward_coef) CONSTRAINT_REPAY_REWARD_COEF="$2"; shift 2 ;;
+        --constraint_repay_target_prob) CONSTRAINT_REPAY_TARGET_PROB="$2"; shift 2 ;;
+        --constraint_repay_target_coef) CONSTRAINT_REPAY_TARGET_COEF="$2"; shift 2 ;;
+        --constraint_lambda_lr) CONSTRAINT_LAMBDA_LR="$2"; shift 2 ;;
+        --constraint_dual_max) CONSTRAINT_DUAL_MAX="$2"; shift 2 ;;
+        --joint_value_tail_coef) JOINT_VALUE_TAIL_COEF="$2"; shift 2 ;;
+        --joint_value_queue_coef) JOINT_VALUE_QUEUE_COEF="$2"; shift 2 ;;
+        --tail_gate_coef) TAIL_GATE_COEF="$2"; shift 2 ;;
+        --multihead_actor_tail_coef) MULTIHEAD_ACTOR_TAIL_COEF="$2"; shift 2 ;;
+        --multihead_actor_queue_coef) MULTIHEAD_ACTOR_QUEUE_COEF="$2"; shift 2 ;;
+        --training_mode) TRAINING_MODE="$2"; shift 2 ;;
         --starvation_penalty_coef) STARVATION_PENALTY_COEF="$2"; shift 2 ;;
         --starvation_threshold) STARVATION_THRESHOLD="$2"; shift 2 ;;
         --starvation_penalty_max_frames) STARVATION_PENALTY_MAX_FRAMES="$2"; shift 2 ;;
@@ -323,6 +383,38 @@ printf 'scenario\tmethod\tseed\tlog_dir\timplementation\tnetwork\trunner\tmacMod
     printf 'service_debt_budget_success_gain\t%s\n' "$SERVICE_DEBT_BUDGET_SUCCESS_GAIN"
     printf 'service_debt_budget_queue_gain\t%s\n' "$SERVICE_DEBT_BUDGET_QUEUE_GAIN"
     printf 'service_debt_wt_threshold\t%s\n' "$SERVICE_DEBT_WT_THRESHOLD"
+    printf 'service_debt_wt_context_adaptive\t%s\n' "$SERVICE_DEBT_WT_CONTEXT_ADAPTIVE"
+    printf 'service_debt_wt_context_min_scale\t%s\n' "$SERVICE_DEBT_WT_CONTEXT_MIN_SCALE"
+    printf 'service_debt_wt_node_deficit_target\t%s\n' "$SERVICE_DEBT_WT_NODE_DEFICIT_TARGET"
+    printf 'service_debt_wt_node_change_target\t%s\n' "$SERVICE_DEBT_WT_NODE_CHANGE_TARGET"
+    printf 'service_debt_wt_edge_change_target\t%s\n' "$SERVICE_DEBT_WT_EDGE_CHANGE_TARGET"
+    printf 'constraint_service_threshold\t%s\n' "$CONSTRAINT_SERVICE_THRESHOLD"
+    printf 'constraint_service_cost_ramp_frames\t%s\n' "$CONSTRAINT_SERVICE_COST_RAMP_FRAMES"
+    printf 'constraint_starvation_threshold\t%s\n' "$CONSTRAINT_STARVATION_THRESHOLD"
+    printf 'constraint_starvation_max_frames\t%s\n' "$CONSTRAINT_STARVATION_MAX_FRAMES"
+    printf 'constraint_debt_max\t%s\n' "$CONSTRAINT_DEBT_MAX"
+    printf 'constraint_debt_repay\t%s\n' "$CONSTRAINT_DEBT_REPAY"
+    printf 'constraint_service_cost_limit\t%s\n' "$CONSTRAINT_SERVICE_COST_LIMIT"
+    printf 'constraint_starvation_cost_limit\t%s\n' "$CONSTRAINT_STARVATION_COST_LIMIT"
+    printf 'constraint_cost_aggregation\t%s\n' "$CONSTRAINT_COST_AGGREGATION"
+    printf 'constraint_tail_fraction\t%s\n' "$CONSTRAINT_TAIL_FRACTION"
+    printf 'constraint_budget_only\t%s\n' "$CONSTRAINT_BUDGET_ONLY"
+    printf 'constraint_budget_allocation\t%s\n' "$CONSTRAINT_BUDGET_ALLOCATION"
+    printf 'constraint_budget_min_share\t%s\n' "$CONSTRAINT_BUDGET_MIN_SHARE"
+    printf 'constraint_repay_action_slots\t%s\n' "$CONSTRAINT_REPAY_ACTION_SLOTS"
+    printf 'constraint_repay_action_threshold\t%s\n' "$CONSTRAINT_REPAY_ACTION_THRESHOLD"
+    printf 'constraint_repay_action_max_nodes\t%s\n' "$CONSTRAINT_REPAY_ACTION_MAX_NODES"
+    printf 'constraint_repay_reward_coef\t%s\n' "$CONSTRAINT_REPAY_REWARD_COEF"
+    printf 'constraint_repay_target_prob\t%s\n' "$CONSTRAINT_REPAY_TARGET_PROB"
+    printf 'constraint_repay_target_coef\t%s\n' "$CONSTRAINT_REPAY_TARGET_COEF"
+    printf 'constraint_lambda_lr\t%s\n' "$CONSTRAINT_LAMBDA_LR"
+    printf 'constraint_dual_max\t%s\n' "$CONSTRAINT_DUAL_MAX"
+    printf 'joint_value_tail_coef\t%s\n' "$JOINT_VALUE_TAIL_COEF"
+    printf 'joint_value_queue_coef\t%s\n' "$JOINT_VALUE_QUEUE_COEF"
+    printf 'tail_gate_coef\t%s\n' "$TAIL_GATE_COEF"
+    printf 'multihead_actor_tail_coef\t%s\n' "$MULTIHEAD_ACTOR_TAIL_COEF"
+    printf 'multihead_actor_queue_coef\t%s\n' "$MULTIHEAD_ACTOR_QUEUE_COEF"
+    printf 'training_mode\t%s\n' "$TRAINING_MODE"
     printf 'starvation_penalty_coef\t%s\n' "$STARVATION_PENALTY_COEF"
     printf 'starvation_threshold\t%s\n' "$STARVATION_THRESHOLD"
     printf 'starvation_penalty_max_frames\t%s\n' "$STARVATION_PENALTY_MAX_FRAMES"
@@ -412,6 +504,38 @@ for scenario in $SCENARIOS; do
                 [ -n "$SERVICE_DEBT_BUDGET_SUCCESS_GAIN" ] && args+=(--service_debt_budget_success_gain "$SERVICE_DEBT_BUDGET_SUCCESS_GAIN")
                 [ -n "$SERVICE_DEBT_BUDGET_QUEUE_GAIN" ] && args+=(--service_debt_budget_queue_gain "$SERVICE_DEBT_BUDGET_QUEUE_GAIN")
                 [ -n "$SERVICE_DEBT_WT_THRESHOLD" ] && args+=(--service_debt_wt_threshold "$SERVICE_DEBT_WT_THRESHOLD")
+                [ "$SERVICE_DEBT_WT_CONTEXT_ADAPTIVE" = true ] && args+=(--service_debt_wt_context_adaptive)
+                [ -n "$SERVICE_DEBT_WT_CONTEXT_MIN_SCALE" ] && args+=(--service_debt_wt_context_min_scale "$SERVICE_DEBT_WT_CONTEXT_MIN_SCALE")
+                [ -n "$SERVICE_DEBT_WT_NODE_DEFICIT_TARGET" ] && args+=(--service_debt_wt_node_deficit_target "$SERVICE_DEBT_WT_NODE_DEFICIT_TARGET")
+                [ -n "$SERVICE_DEBT_WT_NODE_CHANGE_TARGET" ] && args+=(--service_debt_wt_node_change_target "$SERVICE_DEBT_WT_NODE_CHANGE_TARGET")
+                [ -n "$SERVICE_DEBT_WT_EDGE_CHANGE_TARGET" ] && args+=(--service_debt_wt_edge_change_target "$SERVICE_DEBT_WT_EDGE_CHANGE_TARGET")
+                [ -n "$CONSTRAINT_SERVICE_THRESHOLD" ] && args+=(--constraint_service_threshold "$CONSTRAINT_SERVICE_THRESHOLD")
+                [ -n "$CONSTRAINT_SERVICE_COST_RAMP_FRAMES" ] && args+=(--constraint_service_cost_ramp_frames "$CONSTRAINT_SERVICE_COST_RAMP_FRAMES")
+                [ -n "$CONSTRAINT_STARVATION_THRESHOLD" ] && args+=(--constraint_starvation_threshold "$CONSTRAINT_STARVATION_THRESHOLD")
+                [ -n "$CONSTRAINT_STARVATION_MAX_FRAMES" ] && args+=(--constraint_starvation_max_frames "$CONSTRAINT_STARVATION_MAX_FRAMES")
+                [ -n "$CONSTRAINT_DEBT_MAX" ] && args+=(--constraint_debt_max "$CONSTRAINT_DEBT_MAX")
+                [ -n "$CONSTRAINT_DEBT_REPAY" ] && args+=(--constraint_debt_repay "$CONSTRAINT_DEBT_REPAY")
+                [ -n "$CONSTRAINT_SERVICE_COST_LIMIT" ] && args+=(--constraint_service_cost_limit "$CONSTRAINT_SERVICE_COST_LIMIT")
+                [ -n "$CONSTRAINT_STARVATION_COST_LIMIT" ] && args+=(--constraint_starvation_cost_limit "$CONSTRAINT_STARVATION_COST_LIMIT")
+                [ -n "$CONSTRAINT_COST_AGGREGATION" ] && args+=(--constraint_cost_aggregation "$CONSTRAINT_COST_AGGREGATION")
+                [ -n "$CONSTRAINT_TAIL_FRACTION" ] && args+=(--constraint_tail_fraction "$CONSTRAINT_TAIL_FRACTION")
+                [ "$CONSTRAINT_BUDGET_ONLY" = true ] && args+=(--constraint_budget_only)
+                [ -n "$CONSTRAINT_BUDGET_ALLOCATION" ] && args+=(--constraint_budget_allocation "$CONSTRAINT_BUDGET_ALLOCATION")
+                [ -n "$CONSTRAINT_BUDGET_MIN_SHARE" ] && args+=(--constraint_budget_min_share "$CONSTRAINT_BUDGET_MIN_SHARE")
+                [ -n "$CONSTRAINT_REPAY_ACTION_SLOTS" ] && args+=(--constraint_repay_action_slots "$CONSTRAINT_REPAY_ACTION_SLOTS")
+                [ -n "$CONSTRAINT_REPAY_ACTION_THRESHOLD" ] && args+=(--constraint_repay_action_threshold "$CONSTRAINT_REPAY_ACTION_THRESHOLD")
+                [ -n "$CONSTRAINT_REPAY_ACTION_MAX_NODES" ] && args+=(--constraint_repay_action_max_nodes "$CONSTRAINT_REPAY_ACTION_MAX_NODES")
+                [ -n "$CONSTRAINT_REPAY_REWARD_COEF" ] && args+=(--constraint_repay_reward_coef "$CONSTRAINT_REPAY_REWARD_COEF")
+                [ -n "$CONSTRAINT_REPAY_TARGET_PROB" ] && args+=(--constraint_repay_target_prob "$CONSTRAINT_REPAY_TARGET_PROB")
+                [ -n "$CONSTRAINT_REPAY_TARGET_COEF" ] && args+=(--constraint_repay_target_coef "$CONSTRAINT_REPAY_TARGET_COEF")
+                [ -n "$CONSTRAINT_LAMBDA_LR" ] && args+=(--constraint_lambda_lr "$CONSTRAINT_LAMBDA_LR")
+                [ -n "$CONSTRAINT_DUAL_MAX" ] && args+=(--constraint_dual_max "$CONSTRAINT_DUAL_MAX")
+                [ -n "$JOINT_VALUE_TAIL_COEF" ] && args+=(--joint_value_tail_coef "$JOINT_VALUE_TAIL_COEF")
+                [ -n "$JOINT_VALUE_QUEUE_COEF" ] && args+=(--joint_value_queue_coef "$JOINT_VALUE_QUEUE_COEF")
+                [ -n "$TAIL_GATE_COEF" ] && args+=(--tail_gate_coef "$TAIL_GATE_COEF")
+                [ -n "$MULTIHEAD_ACTOR_TAIL_COEF" ] && args+=(--multihead_actor_tail_coef "$MULTIHEAD_ACTOR_TAIL_COEF")
+                [ -n "$MULTIHEAD_ACTOR_QUEUE_COEF" ] && args+=(--multihead_actor_queue_coef "$MULTIHEAD_ACTOR_QUEUE_COEF")
+                [ -n "$TRAINING_MODE" ] && args+=(--training_mode "$TRAINING_MODE")
                 [ -n "$STARVATION_PENALTY_COEF" ] && args+=(--starvation_penalty_coef "$STARVATION_PENALTY_COEF")
                 [ -n "$STARVATION_THRESHOLD" ] && args+=(--starvation_threshold "$STARVATION_THRESHOLD")
                 [ -n "$STARVATION_PENALTY_MAX_FRAMES" ] && args+=(--starvation_penalty_max_frames "$STARVATION_PENALTY_MAX_FRAMES")

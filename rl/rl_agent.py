@@ -79,7 +79,9 @@ class RLFeatureExtractor:
 
     复用 transformer_model 中的 _parse_bown / _parse_t2hop 解析函数，
     追加向量 Pt1（上一帧申请概率）和 HeurProb（本帧启发式基准）以构成完整状态。
-    输入维度 = M + 2M + 10 + M + M + N = 5M + 10 + N（N 为 numNodes）
+    输入维度：
+      - 默认：M + 2M + 10 + M + M + N = 5M + 10 + N
+      - constrained debt：额外追加 service_gap / debt_level / dual_pressure 三维状态
     """
 
     # 标量数值特征（与文档 6.2.1 节对齐）
@@ -88,15 +90,29 @@ class RLFeatureExtractor:
         "mu_nbr", "Sharet", "Share_avgnbr", "Jlocal", "Envy",
     )
 
-    def __init__(self, num_slots: int, num_nodes: int = 1):
+    def __init__(
+        self,
+        num_slots: int,
+        num_nodes: int = 1,
+        include_constraint_features: bool = False,
+    ):
         self.num_slots = num_slots
         self.num_nodes = num_nodes
+        self.include_constraint_features = include_constraint_features
 
     @property
     def input_dim(self) -> int:
-        return 5 * self.num_slots + 10 + self.num_nodes  # 新增 HeurProb (M维)
+        extra = 3 if self.include_constraint_features else 0
+        return 5 * self.num_slots + 10 + self.num_nodes + extra
 
-    def __call__(self, obs: NodeObservation) -> torch.Tensor:
+    def __call__(
+        self,
+        obs: NodeObservation,
+        *,
+        service_gap: float = 0.0,
+        debt_level: float = 0.0,
+        dual_pressure: float = 0.0,
+    ) -> torch.Tensor:
         # 1) Bown：M 位
         bown = _parse_bown(obs.Bown, self.num_slots)
 
@@ -124,7 +140,11 @@ class RLFeatureExtractor:
         if 0 <= nid < self.num_nodes:
             node_onehot[nid] = 1.0
 
-        return torch.tensor(bown + t2hop + numeric + pt1 + heur + node_onehot, dtype=torch.float32)
+        values = bown + t2hop + numeric + pt1 + heur + node_onehot
+        if self.include_constraint_features:
+            values.extend([service_gap, debt_level, dual_pressure])
+
+        return torch.tensor(values, dtype=torch.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +224,76 @@ class LSTMActorCritic(nn.Module):
         return probs, values, new_hidden
 
 
+class CentralizedCritic(nn.Module):
+    """
+    MAPPO critic：训练时读取完整全网序列，并按目标节点输出逐时隙价值。
+
+    Actor 仍只使用各节点局部输入；该 critic 只在训练阶段使用，不改变执行侧接口。
+    """
+
+    def __init__(
+        self,
+        global_input_dim: int,
+        num_nodes: int,
+        num_slots: int,
+        lstm_hidden: int = 64,
+    ):
+        super().__init__()
+        self.num_nodes = num_nodes
+        self.num_slots = num_slots
+        self.lstm = nn.LSTM(global_input_dim, lstm_hidden, batch_first=True)
+        self.value_head = nn.Linear(lstm_hidden + num_nodes, num_slots)
+
+    def forward(
+        self,
+        global_seq: torch.Tensor,
+        target_node_onehot: torch.Tensor,
+    ) -> torch.Tensor:
+        feat, _ = self.lstm(global_seq)
+        state = feat[:, -1, :]
+        fused = torch.cat([state, target_node_onehot], dim=1)
+        return self.value_head(fused)
+
+
+class MultiHeadCentralizedCritic(nn.Module):
+    """
+    Risk-aware MAPPO critic with separate reward / tail / queue value heads.
+
+    Separating the heads avoids forcing one scalar baseline to explain objectives
+    that may trade off against each other.
+    """
+
+    def __init__(
+        self,
+        global_input_dim: int,
+        num_nodes: int,
+        num_slots: int,
+        lstm_hidden: int = 64,
+    ):
+        super().__init__()
+        self.num_nodes = num_nodes
+        self.num_slots = num_slots
+        self.lstm = nn.LSTM(global_input_dim, lstm_hidden, batch_first=True)
+        fused_dim = lstm_hidden + num_nodes
+        self.reward_head = nn.Linear(fused_dim, num_slots)
+        self.tail_head = nn.Linear(fused_dim, num_slots)
+        self.queue_head = nn.Linear(fused_dim, num_slots)
+
+    def forward(
+        self,
+        global_seq: torch.Tensor,
+        target_node_onehot: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        feat, _ = self.lstm(global_seq)
+        state = feat[:, -1, :]
+        fused = torch.cat([state, target_node_onehot], dim=1)
+        return (
+            self.reward_head(fused),
+            self.tail_head(fused),
+            self.queue_head(fused),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Agent：管理多节点的推理状态（滑动窗口 + LSTM 隐状态）
 # ---------------------------------------------------------------------------
@@ -231,12 +321,17 @@ class TDMAAgent:
         seq_len: int = 10,
         lstm1_hidden: int = 32,
         device: str = "cpu",
+        include_constraint_features: bool = False,
     ):
         self.num_slots = num_slots
         self.seq_len   = seq_len
         self.device    = torch.device(device)
 
-        self.extractor = RLFeatureExtractor(num_slots, num_nodes=num_nodes)
+        self.extractor = RLFeatureExtractor(
+            num_slots,
+            num_nodes=num_nodes,
+            include_constraint_features=include_constraint_features,
+        )
         self.net = LSTMActorCritic(
             input_dim    = self.extractor.input_dim,
             num_slots    = num_slots,

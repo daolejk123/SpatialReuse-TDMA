@@ -6,6 +6,23 @@ B_masked	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B with 
 B_masked_debt	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_masked plus service-debt action boost and success reward
 B_masked_debt_budget	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_masked_debt with bounded per-node request budget
 B_masked_debt_adaptive	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_masked_debt_budget with density-aware gating and dynamic request budget
+B_masked_debt_context_gate	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_masked_debt_adaptive with context-aware relaxation of the Wt debt gate
+B_constrained_debt	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B with two-hop mask, continuous debt-based service/starvation constraints, stateful debt, and bounded request budget
+B_constrained_debt_nomask	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_debt without the two-hop action mask
+B_constrained_debt_nobudget	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_debt without request-budget projection
+B_constrained_tail_dual	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_debt with tail-node cost aggregation for dual updates
+B_constrained_budget_only	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_debt using explicit debt only for request-budget projection
+B_constrained_tail_budget	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_budget_only with tail-ranked request-budget bonuses
+B_constrained_smooth_budget	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_budget_only with smooth rank-based request-budget sharing
+B_constrained_repay_action	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_budget_only with explicit tail-debt repayment request actions
+B_constrained_repay_reward	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_budget_only with bounded local tail-debt repayment success rewards
+B_constrained_repay_target	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_budget_only with bounded local tail-debt repayment probability targets
+B_constrained_shared_actor	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_budget_only with a shared local actor/local critic training path
+B_constrained_mappo	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_budget_only with a shared actor and centralized critic CTDE training path
+B_constrained_mappo_risk	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_mappo with explicit tail-risk and queue-risk critic features
+B_constrained_mappo_joint_value	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_mappo_risk with a direct joint tail/queue value target
+B_constrained_mappo_multihead	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_mappo_risk with separate reward/tail/queue critic heads
+B_constrained_mappo_tail_gate	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_mappo_risk with tail-aware non-cancellable actor advantage gating
 D	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	adaptive multiplier ablation path
 DB	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	combined D and B ablation path
 plain_tdma	DynamicTDMA	TDMANetwork	omnet_only	plain_tdma	dynamic_tdma	false	fixed owner-slot TDMA without PPO

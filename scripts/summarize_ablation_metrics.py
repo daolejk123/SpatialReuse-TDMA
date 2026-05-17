@@ -209,23 +209,42 @@ def summarize_slot_stats(path: Path, num_slots: float = math.nan, total_arrivals
     if not path.exists():
         return {}
     final_frame = 0
-    last: list[dict[str, str]] = []
+    current_frame = -1
+    current_rows: list[dict[str, str]] = []
+    last_rows_by_count: dict[int, list[dict[str, str]]] = {}
+    node_ids_seen: set[str] = set()
     generated_cols: list[str] | None = None
     tail_by_node: dict[str, collections.deque[tuple[int, float]]] = collections.defaultdict(lambda: collections.deque(maxlen=101))
+
+    def finalize_frame(rows: list[dict[str, str]]) -> None:
+        if rows:
+            distinct_nodes = len({row["nodeId"] for row in rows})
+            last_rows_by_count[distinct_nodes] = rows.copy()
+
     with path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             if generated_cols is None:
                 generated_cols = [k for k in row if k.startswith("totalGenerated")]
             frame = int(float(row["frame"]))
-            if frame > final_frame:
-                final_frame = frame
-                last = [row]
-            elif frame == final_frame:
-                last.append(row)
+            if current_frame != frame:
+                finalize_frame(current_rows)
+                current_frame = frame
+                current_rows = []
+            current_rows.append(row)
+            node_ids_seen.add(row["nodeId"])
             tail_by_node[row["nodeId"]].append((frame, fnum(row["totalSuccessfulPackets"])))
-    if not last:
+    finalize_frame(current_rows)
+
+    if not last_rows_by_count:
         return {}
+    expected_nodes = len(node_ids_seen)
+    last = last_rows_by_count.get(expected_nodes)
+    if last is None:
+        # Fallback for malformed traces: use the latest frame with the largest observed coverage.
+        last = last_rows_by_count[max(last_rows_by_count)]
+    final_frame = int(float(last[0]["frame"]))
+
     total_packets = sum(fnum(r["totalSuccessfulPackets"]) for r in last)
     total_tx = sum(fnum(r["totalSuccessfulTx"]) for r in last)
     total_requests = sum(fnum(r["totalSlotRequests"]) for r in last)
@@ -242,7 +261,7 @@ def summarize_slot_stats(path: Path, num_slots: float = math.nan, total_arrivals
         last_packets = ordered[-1][1]
         if last_packets - first <= 0:
             starved += 1
-    final_nodes = len(last)
+    final_nodes = expected_nodes or len(last)
     goodput_per_slot = (
         total_packets / (final_frame * num_slots)
         if final_frame and num_slots and not math.isnan(num_slots)
