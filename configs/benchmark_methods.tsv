@@ -6,6 +6,7 @@ B_masked	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B with 
 B_masked_debt	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_masked plus service-debt action boost and success reward
 B_masked_debt_budget	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_masked_debt with bounded per-node request budget
 B_masked_debt_adaptive	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_masked_debt_budget with density-aware gating and dynamic request budget
+B_debt_adaptive	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_masked_debt_adaptive without two-hop mask (service debt + density adaptive + dynamic budget retained, mask-off ablation)
 B_masked_debt_context_gate	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_masked_debt_adaptive with context-aware relaxation of the Wt debt gate
 B_constrained_debt	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B with two-hop mask, continuous debt-based service/starvation constraints, stateful debt, and bounded request budget
 B_constrained_debt_nomask	DynamicTDMA	TDMANetwork	ablation	dynamic_tdma	dynamic_tdma	true	B_constrained_debt without the two-hop action mask

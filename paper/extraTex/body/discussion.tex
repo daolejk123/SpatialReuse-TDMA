@@ -1,0 +1,66 @@
+\section{讨论}
+\label{sec:discussion}
+
+\subsection{设计权衡与场景适配}
+
+\Cref{subsec:ablation} 的四级消融揭示了 DASD-PPO 各机制之间的内禀权衡。
+\emph{服务债务 + 密度自适应 + 请求预算}
+是 DASD-PPO 公平性与扰动鲁棒性收益的真正来源——
+该子集（即 DASD-PPO w/o Mask）在两个静态主场景的有效服务率均跻身全表前二，
+在 Edge Toggle 与 Bridge Break 上的 PDR 衰减抗性与 Recovery throughput 反优于完整 DASD-PPO。
+\emph{两跳掩膜}的角色则需要重新定位：
+其原本被设计为"显式拓扑感知归纳偏置"，
+实际测量结果表明它在密集拓扑下会与服务债务推力争夺有限可行域，
+在高动态边切换场景下因"占用快照"过期而产生反向作用，
+仅在 UAV 稀疏与 Node Rejoin 中提供\emph{微弱}的净正贡献
+（前者 Starvation \(-0.028\)、后者 Recovery TP \(+2.5\%\)）。
+\emph{密度自适应控制}通过 \(\rho_t\) 阈值平滑掩膜启停，
+本是对掩膜负面效应的部分缓解机制；
+但消融数据表明，简单地\emph{完全关闭}掩膜在多数场景下比"按密度部分开启"更具竞争力。
+
+综合实验，DASD-PPO 系列的合理使用画像分为两条：
+\begin{itemize}
+\item \textbf{DASD-PPO}（带掩膜）：适合 \emph{UAV 稀疏 + 节点动态加入} 场景——
+  其唯一明确赢面是 Starvation 微降与 Node Rejoin Recovery 微强。
+\item \textbf{DASD-PPO w/o Mask}：适合 \emph{密集拓扑 + 频繁链路开断} 场景——
+  其 Queue slope、\(W_t\) P95、Edge Toggle 衰减抗性、Bridge Break Recovery throughput
+  在四个学习型变体中均为最佳或并列最佳。
+\end{itemize}
+两者均不应被宣称为"全场景全指标最优"。
+更进一步地，本文建议将两跳掩膜从"主方法的必备机制"降级为
+"\emph{条件触发的可选保护层}"——
+仅在网络密度持续低于阈值\emph{且}拓扑近似稳态时启用，
+其余场景默认关闭以避免快照过期带来的反向作用。
+
+\subsection{已尝试但未采纳的变体}
+
+\sloppy
+工程实验登记中已记录的若干尝试也提供了对设计空间的边界探索：
+\textbf{固定 \(W_t\) 阈值的请求闸门}单独使用并不能跨场景成立；
+\textbf{显式拉格朗日约束变体}由于约束信号容易饱和到 \(1.0\)，
+没有取代 HC-PPO 或 DASD-PPO；
+\textbf{多头 Critic / CTDE 变体}
+在 UAV 稀疏场景下的 long-gap 改善有限，
+但在行人场景下 queue slope 反弹。
+这些负向结果在工程实验登记中已留下完整轨迹，
+不作为本文主结论，
+但提示后续研究在引入更复杂的约束机制时需慎重评估其与已有机制的相互作用。
+\fussy
+
+\subsection{局限性}
+\label{subsec:limitations}
+
+本文存在以下五点基本局限：
+\textbf{(i)} 在 Node Rejoin/Dropout 这种结构性扰动下，
+所有学习型算法在 perturb 段都无法做零样本响应，
+说明当前 PPO 训练分布不覆盖"新节点上线"事件；
+\textbf{(ii)} DASD-PPO 的密度阈值 \(\rho_{\mathrm{sparse}},\rho_{\mathrm{dense}}\)
+与掩膜的"条件触发"判据当前仍是手工选定，缺乏在线超参数调节机制；
+\textbf{(iii)} 实验仅在 \(N=12\)、\(M=10\) 规模下验证，
+更大规模或异构拓扑下的可扩展性尚未在本轮实验中评估；
+\textbf{(iv)} 能耗、信道速率敏感性以及 \texttt{sim\_time}\(>20000\)
+的长期稳定性\emph{该项未在本轮实验中统计}；
+\textbf{(v)} 本文以 DASD-PPO w/o Mask 作为掩膜消融对照变体，
+其 \(\alpha=0.5\) 安全槽初始化是与 PPO-Base/HC-PPO 对齐的"纯关掩膜"实现；
+若进一步搜索"无掩膜下重新调优的 \(\alpha\) 偏置"，
+其相对 DASD-PPO 的优势可能进一步扩大，本文未做该方向的额外消融。

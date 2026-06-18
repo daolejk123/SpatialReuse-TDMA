@@ -1,0 +1,48 @@
+\section{结论与展望}
+\label{sec:conclusion}
+
+本文针对动态多跳无线网络的 TDMA 调度问题，
+提出了密度感知服务债务 PPO（DASD-PPO）调度框架，
+通过\emph{乘数模式策略合成 \(+\) 启发式偏离锚定 \(+\) 两跳安全掩膜
+\(+\) 服务债务 \(+\) 请求预算 \(+\) 密度自适应控制}
+六项机制将 PPO 学习信号约束在拓扑感知可行域内，
+并对长尾节点提供确定性补偿。
+配合 LSTM Actor--Critic 主干（每节点独立、约 13.8K 参数）
+与逐时隙信用分配，
+DASD-PPO 能以在线方式同时学习吞吐与公平性的权衡。
+
+在 OMNeT++ 6.3 平台上的对比实验覆盖了两个静态主场景与四个动态扰动场景，
+共比较了四种学习型算法（PPO-Base、HC-PPO、DASD-PPO w/o Mask、DASD-PPO）与
+七种启发式/论文启发式近似算法。
+其中 DASD-PPO w/o Mask 作为新增的消融对照变体，
+关闭两跳掩膜但保留服务债务、请求预算与密度自适应，
+其作用是单独定位掩膜的边际贡献。
+主要发现可概括为四点：
+（i）\emph{学习型方法对动态拓扑具有结构性鲁棒优势}——
+PDR、throughput 与 Jain 公平性恢复速度均显著优于 paper-inspired 基线，
+有效服务率（\((1-\mathrm{Starv})\times\mathrm{Goodput}\)）上至少高出一个数量级；
+（ii）\emph{DASD-PPO 在 UAV 稀疏拓扑下显著改善公平性}——
+Starvation 由 HC-PPO 的 \(0.5556\) 降至 \(\mathbf{0.2500}\) 全表最低，
+有效服务率 \(\mathbf{0.2012}\) 全表最高；
+（iii）\emph{DASD-PPO 的扰动恢复优势可被验证}——
+Bridge Break 取得最小 PDR 衰减，
+Node Rejoin 恢复段取得最高 throughput（\(2.6072\)）；
+（iv）\emph{两跳掩膜并非 DASD-PPO 的性能核心}——
+新增的 DASD-PPO w/o Mask 在行人静态、Edge Toggle、Bridge Break 三类场景下
+反优于带掩膜的 DASD-PPO（Queue slope/\(W_t\) P95/Edge Toggle 衰减/Bridge Break Recovery TP），
+说明掩膜的真正定位是"防 RL 输出非法动作的硬约束"而非性能驱动因子，
+其性能贡献已被服务债务+密度自适应+请求预算这三件套覆盖。
+实验结果不支持"单一 DASD-PPO 全场景全指标最优"的简单结论；
+DASD-PPO 适合 \emph{UAV 稀疏 + 节点动态加入} 场景，
+DASD-PPO w/o Mask 适合 \emph{密集拓扑 + 频繁链路开断} 场景。
+
+未来工作将围绕五个方向展开：
+（1）将训练分布扩展至节点动态加入/退出事件，
+    缓解 Node Rejoin 中策略对结构性扰动的零样本失败；
+（2）将两跳掩膜从主方法的必备机制降级为\emph{条件触发的可选保护层}，
+    探索基于网络密度与拓扑变更速率的在线启用判据，
+    替代当前手工选定的 \(\rho_{\mathrm{sparse}},\rho_{\mathrm{dense}}\) 阈值；
+（3）研究 Actor--Critic 解耦与多头 Critic 在更大规模拓扑下的可扩展性；
+（4）补全能耗、信道速率敏感性与长仿真时间稳定性等本轮未覆盖的评估维度；
+（5）在无掩膜版本下重新调优安全槽偏置 \(\alpha\)，
+    探索"调优后无掩膜"相对"完整 DASD-PPO"的进一步性能空间。

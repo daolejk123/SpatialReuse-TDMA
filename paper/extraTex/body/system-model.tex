@@ -1,0 +1,75 @@
+\section{系统模型与问题描述}
+\label{sec:model}
+
+\subsection{网络模型}
+
+考虑一个由 \(N\) 个节点构成的多跳无线自组织网络，
+拓扑用无向图 \(\mathcal{G}_t = (\mathcal{V},\mathcal{E}_t)\) 表示，
+其中 \(\mathcal{V}=\{0,1,\ldots,N-1\}\)，
+\(\mathcal{E}_t\) 为帧 \(t\) 时刻的活跃链路集合（允许随时间变化）。
+节点 \(i\) 的一跳邻居集合记为 \(\mathcal{N}_i^{(1)}\)，
+两跳邻居集合记为 \(\mathcal{N}_i^{(2)}=\bigcup_{j\in\mathcal{N}_i^{(1)}}\mathcal{N}_j^{(1)}\setminus\{i\}\)。
+每个节点维护一个分组发送队列 \(Q_{i,t}\)，
+新到达分组按其优先级（低/高/关键）入队。
+
+\subsection{三阶段 TDMA 帧结构}
+
+每个 TDMA 帧包含 \(M\) 个数据时隙，并按以下三个阶段顺序执行：
+\begin{enumerate}
+    \item \textbf{请求阶段（Request Phase, RTS）}：
+        每节点在其专属微时隙广播 \texttt{TDMAGrantRequest}，
+        携带对每个数据时隙的申请概率 \(p_{i,m,t}\in[0,1]\)。
+    \item \textbf{回复阶段（Reply Phase, CTS）}：
+        节点根据收到的 RTS 做出授权决策（+1 同意 / -2 拒绝），
+        广播 \texttt{TDMAGrantReply}；
+        所有 CTS 汇总后构建本帧的占用表 \(\mathrm{occ}_t[m]\)。
+    \item \textbf{数据阶段（Data Phase）}：
+        持有 \(\mathrm{mySlots}_{i,t}[m]=1\) 的节点在时隙 \(m\) 发送其优先级最高的队首分组，
+        阶段结束时向 RL 训练器推送状态特征并读取下一帧动作。
+\end{enumerate}
+策略 \(\pi_\theta(\cdot\mid s_t)\) 输出的是每帧每节点的申请概率向量
+\(p_{\mathrm{req},i,t}\in[0,1]^M\)，
+最终送入仿真的为对 \(p_{\mathrm{req},i,t}\) 独立 Bernoulli 采样得到的二值动作
+\(a_{i,t}\in\{0,1\}^M\)。
+
+\subsection{空间复用约束}
+
+时隙 \(m\) 可被多个节点同时占用，
+当且仅当任意两个占用节点 \(i,j\) 满足两跳安全条件 \(\mathrm{dist}_t(i,j)\ge 3\)。
+本文将该条件作为 DASD-PPO 中两跳掩膜的依据
+（\Cref{subsec:mask}）。
+
+\subsection{优化目标}
+\label{subsec:objective}
+
+记节点 \(i\) 在帧 \(t\) 时隙 \(m\) 的逐时隙结果指示
+\(y_{i,m,t}\in\{0,1,2\}\)：
+\(0\) 表示未申请，\(1\) 表示发送成功，\(2\) 表示发生碰撞或拒绝。
+定义节点 \(i\) 在帧 \(t\) 的瞬时吞吐与公平性指标：
+\begin{equation}
+\mathrm{TX}_{i,t} = \sum_{m=1}^{M}\mathbf{1}[y_{i,m,t}=1],
+\qquad
+J_t = \frac{\left(\sum_i \mathrm{TX}_{i,t}\right)^2}{N\cdot\sum_i \mathrm{TX}_{i,t}^2},
+\label{eq:tx-jain}
+\end{equation}
+其中 \(J_t\in[1/N,1]\) 为 Jain 公平指数~\cite{jain1984}。
+长期优化目标可形式化为
+\begin{equation}
+\max_{\pi_\theta}\;
+\mathbb{E}_{\pi_\theta}\!\left[
+\sum_{t=0}^{T}\gamma^{t}
+\left( \sum_i \mathrm{TX}_{i,t} - \beta\cdot \sum_i \mathrm{Coll}_{i,t} \right)
+\right]
+\;\;\text{s.t.}\;
+\liminf_{t\to\infty} J_t \ge J_{\min},
+\;\;
+\bar{Q}_{i,t} \text{ 有界}.
+\label{eq:problem}
+\end{equation}
+其中 \(\mathrm{Coll}_{i,t}\) 为本帧碰撞次数，
+\(\gamma\in(0,1)\) 为折扣因子，
+\(\beta\) 为碰撞惩罚权重，
+约束保证长期公平性与队列稳定性。
+\eqref{eq:problem} 在动态拓扑下没有闭式解，
+本文以 PPO 的逐时隙信用分解将其松弛为可在线优化的代理目标
+（\Cref{subsec:credit}）。

@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Build paper-ready dynamic-topology figures from one or more benchmark suites."""
+"""Build paper-ready dynamic-topology figures from one or more benchmark suites.
+
+支持指标：PDR / Throughput / Jain（jain_tx）。一次运行生成四张图：
+  - dyn_pdr_trend.{pdf,png}        — 按帧 PDR 趋势 (4 场景 facet)
+  - dyn_jain_trend.{pdf,png}       — 按帧 Jain 公平指数趋势
+  - dyn_throughput_trend.{pdf,png} — 按帧 throughput 趋势
+  - dyn_phase_bars.{pdf,png}       — 4 场景 × 8 方法 × 3 阶段 PDR 分组条形图
+同时写出 dynamic_phase_summary.{csv,md}，供论文表格交叉核对。
+"""
 
 from __future__ import annotations
 
@@ -23,9 +31,14 @@ DEFAULT_SCENARIO_ORDER = [
 ]
 DEFAULT_METHOD_ORDER = [
     "B_masked_debt_adaptive",
+    "B_debt_adaptive",
+    "B",
     "ppo_baseline",
     "greedy_stdma_2hop",
     "heuristic_only",
+    "zmac_inspired",
+    "trama_inspired",
+    "bandit_index_proxy",
 ]
 SCENARIO_LABELS = {
     "N12_grid_manet_pedestrian_edge_toggle": "Edge Toggle",
@@ -34,11 +47,28 @@ SCENARIO_LABELS = {
     "N12_grid_manet_pedestrian_node_dropout": "Node Dropout",
 }
 METHOD_LABELS = {
-    "B_masked_debt_adaptive": "B'",
-    "ppo_baseline": "PPO",
+    "B_masked_debt_adaptive": "DASD-PPO",
+    "B_debt_adaptive": "DASD-PPO w/o Mask",
+    "B": "HC-PPO",
+    "ppo_baseline": "PPO-Base",
     "greedy_stdma_2hop": "Greedy-STDMA-2hop",
     "heuristic_only": "Heuristic",
+    "zmac_inspired": "Z-MAC*",
+    "trama_inspired": "TRAMA*",
+    "bandit_index_proxy": "Bandit-Index*",
 }
+METHOD_STYLE: dict[str, dict[str, object]] = {
+    "B_masked_debt_adaptive": {"color": "#d62728", "linestyle": "-", "linewidth": 2.2},
+    "B_debt_adaptive": {"color": "#e377c2", "linestyle": "-.", "linewidth": 1.8},
+    "B": {"color": "#ff7f0e", "linestyle": "-", "linewidth": 1.6},
+    "ppo_baseline": {"color": "#bcbd22", "linestyle": "-", "linewidth": 1.6},
+    "greedy_stdma_2hop": {"color": "#7f7f7f", "linestyle": "--", "linewidth": 1.6},
+    "heuristic_only": {"color": "#8c564b", "linestyle": "--", "linewidth": 1.6},
+    "zmac_inspired": {"color": "#1f77b4", "linestyle": ":", "linewidth": 1.5},
+    "trama_inspired": {"color": "#17becf", "linestyle": ":", "linewidth": 1.5},
+    "bandit_index_proxy": {"color": "#9467bd", "linestyle": ":", "linewidth": 1.5},
+}
+DATA_COLS = ["pdr", "throughput", "jain"]
 
 
 def seed_key(seed_text: str) -> int:
@@ -77,27 +107,41 @@ def discover_runs(
     return runs
 
 
-def load_run_dataframe(fairness_path: Path) -> pd.DataFrame:
-    df = pd.read_csv(fairness_path)
+def load_run_dataframe(fairness_path: Path) -> pd.DataFrame | None:
+    try:
+        df = pd.read_csv(fairness_path)
+    except (pd.errors.EmptyDataError, FileNotFoundError):
+        return None
+    required = {"sum_arrivals", "sum_delta_packets", "frame"}
+    if df.empty or not required.issubset(df.columns):
+        return None
     df["pdr"] = np.where(
         df["sum_arrivals"] > 0,
         df["sum_delta_packets"] / df["sum_arrivals"],
         np.nan,
     )
     df["throughput"] = df["sum_delta_packets"].astype(float)
-    return df[["frame", "pdr", "throughput"]]
+    df["jain"] = df["jain_tx"].astype(float) if "jain_tx" in df.columns else np.nan
+    return df[["frame"] + DATA_COLS]
 
 
 def aggregate_per_frame(seed_dfs: list[pd.DataFrame]) -> pd.DataFrame:
     merged = pd.concat(seed_dfs, ignore_index=True)
-    return merged.groupby("frame", as_index=False)[["pdr", "throughput"]].mean()
+    return merged.groupby("frame", as_index=False)[DATA_COLS].mean()
 
 
 def collect_data(runs: list[dict[str, object]]) -> dict[tuple[str, str], list[pd.DataFrame]]:
     data: dict[tuple[str, str], list[pd.DataFrame]] = {}
+    skipped: list[str] = []
     for run in runs:
+        df = load_run_dataframe(Path(run["path"]))
+        if df is None:
+            skipped.append(f"{run['scenario']}/{run['method']}/seed{run['seed']}")
+            continue
         key = (str(run["scenario"]), str(run["method"]))
-        data.setdefault(key, []).append(load_run_dataframe(Path(run["path"])))
+        data.setdefault(key, []).append(df)
+    if skipped:
+        print(f"[WARN] skipped {len(skipped)} empty/invalid runs: {skipped}")
     return data
 
 
@@ -168,94 +212,103 @@ def build_phase_summary(
     return pd.DataFrame(rows)
 
 
-def plot_pdr_grid(
+def _save(fig: plt.Figure, out_stem: Path) -> None:
+    for suffix in (".png", ".pdf"):
+        fig.savefig(out_stem.with_suffix(suffix), dpi=180 if suffix == ".png" else None)
+    plt.close(fig)
+
+
+def plot_metric_trend(
     data: dict[tuple[str, str], list[pd.DataFrame]],
     scenarios: list[str],
     methods: list[str],
+    metric: str,
+    ylabel: str,
     out_stem: Path,
     perturb_frame: int,
     recovery_frame: int,
     window: int,
 ) -> None:
     fig, axes = plt.subplots(2, 2, figsize=(12.6, 7.6), sharex=True, sharey=True)
-    colors = {
-        "B_masked_debt_adaptive": "#1f77b4",
-        "ppo_baseline": "#d62728",
-        "greedy_stdma_2hop": "#ff7f0e",
-        "heuristic_only": "#2ca02c",
-    }
     for idx, (ax, scenario) in enumerate(zip(axes.flatten(), scenarios)):
         for method in methods:
             seed_dfs = data.get((scenario, method))
             if not seed_dfs:
                 continue
             agg = aggregate_per_frame(seed_dfs)
-            series = agg["pdr"].rolling(window, min_periods=1).mean()
+            if metric not in agg.columns:
+                continue
+            series = agg[metric].rolling(window, min_periods=1).mean()
+            style = METHOD_STYLE.get(method, {})
             ax.plot(
                 agg["frame"],
                 series,
                 label=METHOD_LABELS.get(method, method),
-                color=colors.get(method),
-                linewidth=1.7,
+                color=style.get("color"),
+                linestyle=style.get("linestyle", "-"),
+                linewidth=style.get("linewidth", 1.5),
             )
-        ax.axvline(perturb_frame, color="#d62728", linestyle="--", alpha=0.55)
+        ax.axvline(perturb_frame, color="#d62728", linestyle="--", alpha=0.45)
         if has_recovery(scenario):
-            ax.axvline(recovery_frame, color="#2ca02c", linestyle="--", alpha=0.55)
+            ax.axvline(recovery_frame, color="#2ca02c", linestyle="--", alpha=0.45)
         ax.set_title(SCENARIO_LABELS.get(scenario, scenario))
         ax.grid(alpha=0.25)
         ax.set_xlabel("Frame" if idx >= 2 else "")
-        ax.set_ylabel("Packet delivery ratio" if idx % 2 == 0 else "")
+        ax.set_ylabel(ylabel if idx % 2 == 0 else "")
     handles, labels = axes.flatten()[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=4, frameon=False)
-    fig.tight_layout(rect=(0, 0.05, 1, 1))
-    for suffix in (".png", ".pdf"):
-        fig.savefig(out_stem.with_suffix(suffix), dpi=180 if suffix == ".png" else None)
-    plt.close(fig)
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    _save(fig, out_stem)
 
 
-def plot_phase_grid(summary: pd.DataFrame, scenarios: list[str], methods: list[str], out_stem: Path) -> None:
-    fig, axes = plt.subplots(2, 2, figsize=(12.6, 7.6), sharey=True)
+def plot_phase_bars(
+    summary: pd.DataFrame,
+    scenarios: list[str],
+    methods: list[str],
+    out_stem: Path,
+) -> None:
+    fig, axes = plt.subplots(2, 2, figsize=(13.2, 7.6), sharey=True)
     phase_cols = [
         ("pdr_pre", "Pre"),
         ("pdr_perturb", "Perturb"),
         ("pdr_recovery", "Recovery"),
     ]
-    width = 0.18
     method_count = len(methods)
-    colors = {
-        "B_masked_debt_adaptive": "#1f77b4",
-        "ppo_baseline": "#d62728",
-        "greedy_stdma_2hop": "#ff7f0e",
-        "heuristic_only": "#2ca02c",
-    }
+    total_group_width = 0.9
+    width = total_group_width / max(method_count, 1)
     x = np.arange(len(phase_cols))
-    for idx, (ax, scenario) in enumerate(zip(axes.flatten(), scenarios)):
+    for panel_idx, (ax, scenario) in enumerate(zip(axes.flatten(), scenarios)):
         subset = summary[summary["scenario"] == scenario]
-        for idx, method in enumerate(methods):
+        for m_idx, method in enumerate(methods):
             row = subset[subset["method"] == method]
             if row.empty:
                 continue
             values = [float(row.iloc[0][col]) for col, _ in phase_cols]
-            offset = (idx - (method_count - 1) / 2) * width
+            values = [0.0 if (isinstance(v, float) and math.isnan(v)) else v for v in values]
+            offset = (m_idx - (method_count - 1) / 2) * width
+            style = METHOD_STYLE.get(method, {})
             ax.bar(
                 x + offset,
                 values,
                 width=width,
                 label=METHOD_LABELS.get(method, method),
-                color=colors.get(method),
+                color=style.get("color"),
+                edgecolor="#333333",
+                linewidth=0.3,
             )
         ax.set_title(SCENARIO_LABELS.get(scenario, scenario))
         ax.set_xticks(x, [label for _, label in phase_cols])
-        ax.set_ylabel("Packet delivery ratio" if idx % 2 == 0 else "")
+        ax.set_ylabel("Packet delivery ratio" if panel_idx % 2 == 0 else "")
         if not has_recovery(scenario):
-            ax.text(x[-1], 0.006, "N/A", ha="center", va="bottom", fontsize=9, color="#666666")
+            ax.text(
+                x[-1], 0.006, "N/A (no recovery phase)",
+                ha="center", va="bottom", fontsize=8, color="#666666",
+            )
         ax.grid(axis="y", alpha=0.25)
     handles, labels = axes.flatten()[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=4, frameon=False)
-    fig.tight_layout(rect=(0, 0.05, 1, 1))
-    for suffix in (".png", ".pdf"):
-        fig.savefig(out_stem.with_suffix(suffix), dpi=180 if suffix == ".png" else None)
-    plt.close(fig)
+    fig.tight_layout(rect=(0, 0.10, 1, 1))
+    _save(fig, out_stem)
 
 
 def markdown_table(summary: pd.DataFrame, scenarios: list[str], methods: list[str]) -> str:
@@ -313,23 +366,42 @@ def main() -> int:
         args.recovery_at_frame,
     )
 
-    plot_pdr_grid(
-        data,
-        scenarios,
-        methods,
-        out_dir / "dynamic_pdr_grid",
-        args.perturb_at_frame,
-        args.recovery_at_frame,
-        args.window,
+    plot_metric_trend(
+        data, scenarios, methods,
+        metric="pdr",
+        ylabel="Packet delivery ratio",
+        out_stem=out_dir / "dyn_pdr_trend",
+        perturb_frame=args.perturb_at_frame,
+        recovery_frame=args.recovery_at_frame,
+        window=args.window,
     )
-    plot_phase_grid(summary, scenarios, methods, out_dir / "dynamic_phase_grid")
+    plot_metric_trend(
+        data, scenarios, methods,
+        metric="jain",
+        ylabel="Jain fairness (jain_tx)",
+        out_stem=out_dir / "dyn_jain_trend",
+        perturb_frame=args.perturb_at_frame,
+        recovery_frame=args.recovery_at_frame,
+        window=args.window,
+    )
+    plot_metric_trend(
+        data, scenarios, methods,
+        metric="throughput",
+        ylabel="Throughput (packets/frame)",
+        out_stem=out_dir / "dyn_throughput_trend",
+        perturb_frame=args.perturb_at_frame,
+        recovery_frame=args.recovery_at_frame,
+        window=args.window,
+    )
+    plot_phase_bars(summary, scenarios, methods, out_dir / "dyn_phase_bars")
+
     summary.to_csv(out_dir / "dynamic_phase_summary.csv", index=False)
     (out_dir / "dynamic_phase_summary.md").write_text(
         markdown_table(summary, scenarios, methods),
         encoding="utf-8",
     )
-    print(f"[PLOT] {out_dir / 'dynamic_pdr_grid.png'}")
-    print(f"[PLOT] {out_dir / 'dynamic_phase_grid.png'}")
+    for stem in ("dyn_pdr_trend", "dyn_jain_trend", "dyn_throughput_trend", "dyn_phase_bars"):
+        print(f"[PLOT] {out_dir / (stem + '.pdf')}")
     print(f"[SUMMARY] {out_dir / 'dynamic_phase_summary.csv'}")
     return 0
 

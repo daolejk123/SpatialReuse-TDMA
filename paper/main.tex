@@ -1,0 +1,139 @@
+%!TEX program = xelatex
+%=============================================================================
+% 基于强化学习的动态 TDMA MAC 协议调度优化（bensz-paper / paper-sci-01）
+% 编译: xelatex → biber → xelatex → xelatex
+%=============================================================================
+\documentclass[12pt,a4paper]{article}
+
+%=============================================================================
+% 中文支持：ctex 先于 bensz-paper 加载，提供 xeCJK 与中文字体环境
+%=============================================================================
+\usepackage[UTF8,fontset=fandol]{ctex}
+
+%=============================================================================
+% bensz-paper 公共样式（SCI/期刊论文 paper-sci-01 profile）
+%=============================================================================
+\usepackage{bensz-paper}
+\BenszPaperSetup{
+  template = paper-sci-01,
+  bibliography-style = gb7714-2015,
+  line-numbers = true
+}
+
+%=============================================================================
+% 中文期刊样式覆盖：bensz-paper 默认无章节号；这里恢复 "1 引言 / 1.1 子节" 风格
+%=============================================================================
+\setcounter{secnumdepth}{3}   % section/subsection/subsubsection 编号；\paragraph 不编号
+\titleformat{\section}
+  {\bfseries\fontsize{14pt}{18pt}\selectfont}
+  {\thesection}{0.6em}{}
+\titleformat{\subsection}
+  {\bfseries\fontsize{12pt}{16pt}\selectfont}
+  {\thesubsection}{0.5em}{}
+\titleformat{\subsubsection}
+  {\bfseries\normalsize}
+  {\thesubsubsection}{0.5em}{}
+
+%=============================================================================
+% bensz-paper 未预加载的扩展包（数学 / TikZ / 算法 / 子图 / siunitx / cleveref）
+%=============================================================================
+\usepackage{mathtools}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{siunitx}
+\sisetup{detect-all}
+
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric}
+
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\floatname{algorithm}{算法}
+\renewcommand{\listalgorithmname}{算法索引}
+
+%=============================================================================
+% 定理类环境
+%=============================================================================
+\theoremstyle{plain}
+\newtheorem{theorem}{定理}[section]
+\newtheorem{lemma}[theorem]{引理}
+\newtheorem{proposition}[theorem]{命题}
+\newtheorem{corollary}[theorem]{推论}
+\theoremstyle{definition}
+\newtheorem{definition}{定义}[section]
+\newtheorem{example}{例}[section]
+\theoremstyle{remark}
+\newtheorem{remark}{注记}[section]
+
+%=============================================================================
+% 参考文献（bensz-paper 已预载 biblatex；vancouver / gb7714-2015 二选一）
+%=============================================================================
+\addbibresource{references/refs.bib}
+\ExecuteBibliographyOptions{url=true, doi=true}
+
+%=============================================================================
+% cleveref（必须在 hyperref 之后；bensz-paper 已先载入 hyperref）
+%=============================================================================
+\usepackage{cleveref}
+\crefformat{equation}{式~(#2#1#3)}
+\Crefformat{equation}{式~(#2#1#3)}
+\crefformat{figure}{图~#2#1#3}
+\Crefformat{figure}{图~#2#1#3}
+\crefformat{table}{表~#2#1#3}
+\Crefformat{table}{表~#2#1#3}
+\crefformat{section}{第~#2#1#3~节}
+\Crefformat{section}{第~#2#1#3~节}
+\crefformat{subsection}{第~#2#1#3~节}
+\Crefformat{subsection}{第~#2#1#3~节}
+\crefformat{algorithm}{算法~#2#1#3}
+\Crefformat{algorithm}{算法~#2#1#3}
+
+%=============================================================================
+% 自定义命令
+%=============================================================================
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\Z}{\mathbb{Z}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclarePairedDelimiter{\abs}{\lvert}{\rvert}
+\DeclarePairedDelimiter{\norm}{\lVert}{\rVert}
+
+%=============================================================================
+% 浮动体放置策略：放宽默认阈值，减少大图/大表造成的空白页
+%   - topfraction      ↑：允许顶部浮动体占用更多版面
+%   - bottomfraction   ↑：允许底部同上
+%   - textfraction     ↓：允许页面文字比例更低（少留底）
+%   - floatpagefraction↑：浮动页面必须装满到此比例才被接受
+%   - topnumber/bottomnumber/totalnumber：放宽每页可放浮动体数量
+%=============================================================================
+\renewcommand{\topfraction}{0.92}
+\renewcommand{\bottomfraction}{0.85}
+\renewcommand{\textfraction}{0.06}
+\renewcommand{\floatpagefraction}{0.80}
+\setcounter{topnumber}{4}
+\setcounter{bottomnumber}{4}
+\setcounter{totalnumber}{8}
+
+%=============================================================================
+\begin{document}
+
+\input{extraTex/front/frontmatter.tex}
+\input{extraTex/front/abstract.tex}
+
+\input{extraTex/body/introduction.tex}
+\input{extraTex/body/related-work.tex}
+\input{extraTex/body/system-model.tex}
+\input{extraTex/body/method.tex}
+\input{extraTex/body/experiments.tex}
+\input{extraTex/body/discussion.tex}
+\input{extraTex/body/conclusion.tex}
+
+% \input{extraTex/back/additional-information.tex}   % 致谢（如需启用，去掉本行注释）
+
+\section{References}
+\printbibliography[heading=none]
+
+\end{document}

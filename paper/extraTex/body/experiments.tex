@@ -1,0 +1,490 @@
+\section{实验评估}
+\label{sec:exp}
+
+本节按以下顺序组织：
+\Cref{subsec:setup} 给出仿真平台、对比算法、评价指标与超参数；
+\Cref{subsec:static-results} 报告两个静态主场景下十一种算法的横向对比；
+\Cref{subsec:dynamic-results} 报告四种动态扰动场景下的按帧趋势与三阶段统计；
+\Cref{subsec:ablation} 通过 PPO-Base \(\rightarrow\) HC-PPO \(\rightarrow\) DASD-PPO w/o Mask \(\rightarrow\) DASD-PPO 的四级演进对比，
+分别定位\emph{启发式锚定}、\emph{服务债务/密度自适应/请求预算}以及\emph{两跳掩膜}三组机制的边际贡献。
+
+\subsection{实验设置}
+\label{subsec:setup}
+
+\subsubsection{仿真平台与拓扑}
+
+实验基于 OMNeT++ 6.3 实现~\cite{omnetpp}，
+通过 POSIX 命名管道与独立运行的 PPO 训练器进程做异步双向通信。
+本文主表采用两个 MANET 主场景：
+\texttt{N12\_grid\_manet\_pedestrian}（行人移动模型，\(N=12\) 节点，\(M=10\) 时隙）
+与 \texttt{N12\_grid\_manet\_uav\_sparse}（无人机灵感稀疏拓扑，
+平均度数显著低于行人场景）。
+动态扰动评估在行人主场景的四个变体上进行：
+\textbf{Edge Toggle}（链路开断切换）、
+\textbf{Bridge Break}（关键桥接链路断开）、
+\textbf{Node Rejoin}（已下线节点重新加入）、
+\textbf{Node Dropout}（节点永久脱离）。
+扰动起始帧固定为 \(\tau_{\mathrm{perturb}}=20000\)，
+恢复段起始帧为 \(\tau_{\mathrm{recovery}}=40000\)；
+Node Dropout 场景按设计不存在恢复段，
+其恢复列在统计上以 N/A 标注。
+
+\subsubsection{对比算法}
+
+本文共比较十一种算法，可分为三组：
+
+\paragraph{学习型算法（内部演进）}
+PPO-Base、HC-PPO、\textbf{DASD-PPO w/o Mask}（DASD-PPO 关闭两跳掩膜的消融变体）、DASD-PPO，
+四者的差异已在 \Cref{tab:algo-naming} 与 \Cref{fig:algo-evolution} 给出。
+所有学习型算法均采用同一组 PPO 训练超参数与训练预算。
+其中 DASD-PPO w/o Mask 与 DASD-PPO 的唯一差异是 \Cref{subsec:mask} 描述的两跳安全掩膜与配套的 \(\alpha=0.75\) 安全槽偏置，
+其它机制（启发式偏离锚定、服务债务推力、请求预算、密度自适应控制）完全相同；
+其作用是为 \Cref{subsec:ablation} 提供"掩膜单独贡献"的边际证据。
+
+\paragraph{启发式与 STDMA 强基线}
+\textbf{plain TDMA}（仅按所有者时隙分配，无空间复用）；
+\textbf{Heuristic}（本仓库实现的贪心启发式申请策略）；
+\textbf{Greedy-STDMA-2hop}（两跳安全的贪心空间复用 TDMA~\cite{stdma}）；
+\textbf{Traffic-Adaptive TDMA}（所有者时隙保留加基于队列长度的机会复用）。
+
+\paragraph{论文启发式近似（paper-inspired）}
+\textbf{Z-MAC*}、\textbf{TRAMA*}、\textbf{Bandit-Index*} 分别为对
+Z-MAC~\cite{zmac}、TRAMA~\cite{trama} 与多臂老虎机索引调度~\cite{bandit}
+的本地近似实现。星号注明此类方法\emph{未}完整复现原协议状态机，
+仅按其核心机制（混合分配/竞争、确定性两跳仲裁、UCB 索引）做轻量化实现，
+作为论文文献基线的下界参考。
+
+\subsubsection{评价指标}
+
+静态主场景关注：
+\textbf{Goodput/slot}~\(\uparrow\)（单时隙有效吞吐）、
+\textbf{PDR}~\(\uparrow\)（分组投递率）、
+\textbf{MAC 效率}~\(\uparrow\)、
+\textbf{Queue slope}~\(\downarrow\)（队列长度斜率，反映长期稳定性）、
+\textbf{\(W_t\) P95}~\(\downarrow\)（队首等待时间 95 分位）、
+\textbf{Jain 尾 100 帧}~\(\uparrow\)（最后 100 帧的发送公平指数）、
+\textbf{Starvation ratio}~\(\downarrow\)（饥饿节点比例）、
+\textbf{有效服务率}~\(\uparrow\)~\(\big({=}\,(1-\mathrm{Starv})\times\mathrm{Goodput}\big)\)
+（衡量"既有人发又发得多"的复合指标，
+用于消除 Jain 在低吞吐场景下退化为"大家一起穷"型伪公平的偏差）。
+动态扰动评估对每个场景将仿真切分为
+\(\mathrm{pre}/\mathrm{perturb}/\mathrm{recovery}\) 三阶段，
+分别报告\textbf{每帧 PDR} 与\textbf{每帧 throughput} 的平均值。
+所有数值取 3 个独立随机种子的平均。
+
+\subsubsection{超参数与训练预算}
+
+PPO 学习率 \(\eta=5\times 10^{-4}\)（每次更新后按 \(0.9995\) 指数衰减），
+折扣因子 \(\gamma=0.95\)、GAE 参数 \(\lambda=0.95\)、PPO clip 参数 \(\epsilon=0.2\)、
+熵系数 \(c_{\mathrm{ent}}=0.05\)（自适应：下限 \(0.05\)、上限 \(0.10\)，
+按 entropy 值在 \([0.45,0.55]\) 区间线性插值）。
+LSTM 隐层维度 \(32\)（单层）；
+每节点独立优化器、独立 \(\sim 13.5\)K 参数。
+正式实验采用 3 个随机种子，
+仿真时长为 \(20{,}000\) 帧，
+所有学习型方法均要求 PPO 更新数达到 \(400\) 次目标值；
+静态主场景实验 \(60/60\) 次运行完整收尾、\(36/36\) 次学习型实验达到目标 PPO 更新次数；
+动态扰动实验覆盖 \(4\) 场景 \(\times\, 9\) 方法 \(\times\, 3\) seeds 共 \(108\) 次运行
+（其中新增的 DASD-PPO w/o Mask 变体补跑 \(12\) 次，与原 \(96\) 次合并）。
+
+\subsection{静态主场景结果}
+\label{subsec:static-results}
+
+\Cref{tab:static-pedestrian} 与 \Cref{tab:static-uav-sparse}
+分别给出行人与 UAV 稀疏两个主场景下十一种算法的对比结果。
+所有数值直接取自正式实验 summary。
+
+\paragraph{关于 Jain 尾 100 的正确解读。}
+Jain 指数 \eqref{eq:tx-jain} 在分母含 \(\sum_i\mathrm{TX}_i^2\)：
+当所有节点发送量都同步趋近零时 \(J\to 1\)，即\emph{"大家一起穷"也会被算成完美公平}。
+表格中 Traffic-Adaptive TDMA（Jain \(0.890\)、Starvation \(0.917\)）
+与 Bandit-Index*（Jain \(0.842\)、Starvation \(0.694\)）即落在该退化区。
+因此本文不单看 Jain，而以\emph{有效服务率}~\((1-\mathrm{Starv})\times\mathrm{Goodput}\)
+作复合排序，
+同时奖励"参与节点多"与"参与节点发得多"。
+
+\begin{table}[!htbp]
+\centering
+\caption{行人主场景（\texttt{N12\_grid\_manet\_pedestrian}）静态对比，3 seeds 平均}
+\label{tab:static-pedestrian}
+\setlength{\tabcolsep}{4pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}lrrrrrrrr@{}}
+\toprule
+\textbf{方法} &
+  \textbf{Goodput/slot}\(\uparrow\) &
+  \textbf{PDR}\(\uparrow\) &
+  \textbf{MAC eff.}\(\uparrow\) &
+  \textbf{Queue slope}\(\downarrow\) &
+  \textbf{\(W_t\) P95}\(\downarrow\) &
+  \textbf{Jain 尾 100}\(\uparrow\) &
+  \textbf{Starv.}\(\downarrow\) &
+  \textbf{Eff. Svc.}\(\uparrow\) \\
+\midrule
+plain TDMA            & 0.0628 & 0.0308 & 0.0524 & 18.2623 & 18716.3 & 0.1069 & 0.6944 & 0.0192 \\
+Heuristic             & 0.1473 & 0.0722 & 0.0123 & 18.3855 & 18425.5 & 0.5416 & 0.7778 & 0.0327 \\
+Greedy-STDMA-2hop     & 0.1608 & 0.0789 & 0.0136 & 17.9578 & 18343.5 & 0.6849 & 0.8333 & 0.0268 \\
+Traffic-Adaptive TDMA & 0.0267 & 0.0131 & 0.0022 & 19.9179 & 18757.5 & 0.8900 & 0.9167 & 0.0022 \\
+Z-MAC*                & 0.0663 & 0.0325 & 0.0552 & 19.5523 & 18764.5 & 0.5731 & 0.8611 & 0.0092 \\
+TRAMA*                & 0.0371 & 0.0182 & 0.0153 & 18.8684 & 18644.7 & 0.6077 & 0.5278 & 0.0175 \\
+Bandit-Index*         & 0.0343 & 0.0168 & 0.0075 & 20.3143 & 18662.2 & 0.8422 & 0.6944 & 0.0105 \\
+\addlinespace[2pt]
+PPO-Base                   & 0.2710 & 0.1329 & 0.0452 & 17.1105 & 16062.1 & 0.2765 & 0.6944 & 0.0829 \\
+HC-PPO                     & \textbf{0.2770} & \textbf{0.1356} & \textbf{0.0464} & \textbf{16.6721} & \textbf{15824.8} & 0.4921 & 0.6944 & 0.0847 \\
+\textbf{DASD-PPO w/o Mask} & 0.2685 & 0.1319 & 0.0390 & 16.8423 & \textbf{15113.0} & 0.2784 & \textbf{0.5000} & \textbf{0.1343} \\
+\textbf{DASD-PPO}          & 0.2720 & 0.1334 & 0.0388 & 18.5290 & 16039.4 & 0.4433 & 0.6944 & 0.0832 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\begin{table}[!htbp]
+\centering
+\caption{UAV 稀疏主场景（\texttt{N12\_grid\_manet\_uav\_sparse}）静态对比，3 seeds 平均}
+\label{tab:static-uav-sparse}
+\setlength{\tabcolsep}{4pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}lrrrrrrrr@{}}
+\toprule
+\textbf{方法} &
+  \textbf{Goodput/slot}\(\uparrow\) &
+  \textbf{PDR}\(\uparrow\) &
+  \textbf{MAC eff.}\(\uparrow\) &
+  \textbf{Queue slope}\(\downarrow\) &
+  \textbf{\(W_t\) P95}\(\downarrow\) &
+  \textbf{Jain 尾 100}\(\uparrow\) &
+  \textbf{Starv.}\(\downarrow\) &
+  \textbf{Eff. Svc.}\(\uparrow\) \\
+\midrule
+plain TDMA            & 0.0493 & 0.0242 & 0.0411 & 14.2274 & 18534.9 & 0.6533 & 0.8333 & 0.0082 \\
+Heuristic             & 0.2723 & 0.1335 & 0.0227 & 10.2692 & 15539.0 & 0.2803 & 0.5556 & 0.1209 \\
+Greedy-STDMA-2hop     & 0.2661 & 0.1305 & 0.0224 & 10.3666 & 15758.1 & 0.3006 & 0.4444 & 0.1479 \\
+Traffic-Adaptive TDMA & 0.0852 & 0.0418 & 0.0071 & 12.2306 & 17742.7 & 0.8165 & 0.6667 & 0.0284 \\
+Z-MAC*                & 0.0544 & 0.0267 & 0.0454 & 13.4321 & 18451.8 & 0.7542 & 0.8056 & 0.0106 \\
+TRAMA*                & 0.0728 & 0.0357 & 0.0100 & 13.9033 & 17903.3 & 0.7415 & 0.5833 & 0.0303 \\
+Bandit-Index*         & 0.0567 & 0.0278 & 0.0124 & 13.2741 & 18126.0 & 0.8180 & 0.6944 & 0.0173 \\
+\addlinespace[2pt]
+PPO-Base                   & 0.2423 & 0.1188 & 0.0403 & 10.2136 & 14884.8 & 0.4050 & 0.3889 & 0.1480 \\
+HC-PPO                     & 0.2430 & 0.1191 & 0.0406 & 9.9872 & 14682.9 & 0.3690 & 0.5556 & 0.1079 \\
+\textbf{DASD-PPO w/o Mask} & 0.2598 & 0.1276 & 0.0395 & \textbf{9.5979} & \textbf{13528.3} & 0.3304 & 0.2778 & 0.1876 \\
+\textbf{DASD-PPO}          & \textbf{0.2683} & \textbf{0.1315} & 0.0313 & 12.0047 & 14886.2 & 0.3555 & \textbf{0.2500} & \textbf{0.2012} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\sloppy
+两张表呈现的结果可以从三个维度解读。
+\emph{首先}，学习型算法整体显著优于
+paper-inspired 论文启发式近似：
+PPO-Base 与 HC-PPO 在行人场景的 Goodput/slot 较
+Z-MAC*、TRAMA* 与 Bandit-Index* 高约 4--8 倍；
+UAV 稀疏场景中三个 paper-inspired 方法 Goodput/slot
+均不足 0.08，而所有学习型算法均超过 0.24。
+这一差距证实了在动态拓扑下，
+基于在线策略梯度的调度比固定权值仲裁更有竞争力。
+\fussy
+
+\emph{其次}，行人场景中 HC-PPO 在七项指标中的四项
+（Goodput/slot、PDR、MAC 效率、\(W_t\) P95、Queue slope）取得最优，
+表明启发式偏离惩罚对密集拓扑确实有正向收益；
+DASD-PPO 在该场景下的吞吐与 PDR 与 HC-PPO 基本持平
+（Goodput/slot 0.2720 vs 0.2770，相对回退 \(\sim 1.8\%\)），
+但 Queue slope 由 16.67 升至 18.53，说明
+两跳掩膜与服务债务在邻居密度较高的拓扑里增加了队列累积压力。
+因此 DASD-PPO 在行人场景\emph{并未}全面优于 HC-PPO，
+不应被宣称为该场景下的主方法。
+
+\emph{第三}，UAV 稀疏场景中 DASD-PPO 的特征则相反。
+其 Goodput/slot（0.2683）相较 HC-PPO（0.2430）提升约 \(10.4\%\)，
+接近 Heuristic（0.2723）；
+其 Starvation 比例由 HC-PPO 的 0.5556 与 Heuristic 的 0.5556
+显著下降至 \textbf{0.2500}，是全表所有算法中最低。
+代价是 Queue slope 由 HC-PPO 的 9.99 升至 12.00。
+该现象与算法设计一致：在稀疏拓扑下两跳安全集合较小，
+服务债务机制能更精准地为长期未服务节点分配安全候选；
+而密度自适应控制让掩膜在密度更高的行人场景中部分退化，
+减少了过严约束带来的可行域损失。
+
+\paragraph{两跳掩膜的边际贡献：意外的负向证据。}
+将 DASD-PPO w/o Mask 与 DASD-PPO 直接对比，
+可以读出两跳掩膜在静态主场景中的真实边际贡献：
+\emph{行人场景}下，去掉掩膜反而把 Queue slope 从 \(18.53\) 降到 \(16.84\)（\(-9.1\%\)）、
+\(W_t\) P95 从 \(16039\) 降到 \(\mathbf{15113}\)（全表最低）、
+Starvation 从 \(0.6944\) 降到 \(\mathbf{0.5000}\)，
+吞吐与 PDR 仅微降 \(\sim 1.3\%\)；
+\emph{UAV 稀疏场景}下，去掉掩膜把 Queue slope 从 \(12.00\) 降到 \(\mathbf{9.60}\)（\(-20\%\)）、
+\(W_t\) P95 从 \(14886\) 降到 \(\mathbf{13528}\)，
+Goodput 从 \(0.2683\) 降到 \(0.2598\)（\(-3.2\%\)）、
+Starvation 仅由 \(0.2500\) 微升至 \(0.2778\)。
+这一对比颠覆了"掩膜是 DASD-PPO 性能核心"的设计直觉——
+两跳掩膜在密集拓扑中收缩可行域、抬升队列累积压力，
+在稀疏拓扑中则与服务债务推力争夺有限的安全候选，
+其唯一明确的净收益是 UAV 场景的 Starvation 微降。
+\Cref{subsec:ablation} 与 \Cref{sec:discussion} 将进一步用动态扰动数据验证该结论。
+
+\paragraph{有效服务率：联合解读公平性与吞吐。}
+直接对比 Jain 尾 100 容易被低吞吐方法的"伪公平"误导
+（Traffic-Adaptive TDMA Jain \(0.890\) 实由 \(0.917\) 的饥饿率支撑），
+本文以\emph{有效服务率} \((1-\mathrm{Starv})\times\mathrm{Goodput}\) 作复合排序：
+该指标同时奖励"参与的节点多"与"参与节点的吞吐高"，
+在所有 \(11\) 种方法上构成无歧义偏序。
+行人场景中 \textbf{DASD-PPO w/o Mask 取得全表最高的 \(0.1343\)}，
+是 HC-PPO（\(0.0847\)）的 \(1.58\) 倍、是 Bandit-Index*（\(0.0105\)）的 \(12.8\) 倍；
+UAV 稀疏场景中 DASD-PPO（\(\mathbf{0.2012}\)）与 DASD-PPO w/o Mask（\(0.1876\)）
+分别排名第一与第二，
+显著高于 Greedy-STDMA-2hop（\(0.1479\)）与 Heuristic（\(0.1209\)）。
+有效服务率视角下，DASD-PPO 与 DASD-PPO w/o Mask 的差距在两场景间互有胜负，
+进一步说明两跳掩膜的取舍是场景依赖而非性能必需。
+
+综合两个场景，DASD-PPO 的合理定位是\emph{在稀疏拓扑场景下显著改善公平性与饥饿，
+保持吞吐接近 Heuristic 与 HC-PPO 的水平}；
+而 DASD-PPO w/o Mask 在行人场景下提供\emph{更低队列压力与更低饥饿}，
+在 UAV 稀疏场景下\emph{以微弱吞吐回退换取更短 \(W_t\) P95 与队列稳定}。
+两者均不应被宣称为"全场景全指标最优"。
+
+\subsection{动态扰动结果}
+\label{subsec:dynamic-results}
+
+\Cref{fig:dyn-pdr-trend}--\Cref{fig:dyn-phase-bars} 给出四个动态扰动场景下
+全部九种算法的按帧指标趋势与三阶段统计，
+\Cref{tab:dyn-phase} 汇总了三阶段平均 PDR 与 throughput。
+新增的 \textbf{DASD-PPO w/o Mask} 行用于在动态扰动维度上单独定位两跳掩膜的边际贡献。
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{../results/dynamic_paper_extra_with_nomask_20260524/dyn_pdr_trend.pdf}
+\caption{四个动态扰动场景下九种算法的按帧 PDR 趋势。
+红色虚线为扰动起点（frame \(=20000\)），
+绿色虚线为恢复起点（frame \(=40000\)）；
+Node Dropout 场景无恢复阶段。
+曲线为同方法 3 个 seed 的均值与 500-帧滑动窗口平滑。}
+\label{fig:dyn-pdr-trend}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{../results/dynamic_paper_extra_with_nomask_20260524/dyn_jain_trend.pdf}
+\caption{按帧 Jain 公平指数（发送公平性 \texttt{jain\_tx}）趋势。
+学习型算法（实线）在扰动后的公平性恢复速度普遍快于
+paper-inspired 方法（点线）。}
+\label{fig:dyn-jain-trend}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{../results/dynamic_paper_extra_with_nomask_20260524/dyn_throughput_trend.pdf}
+\caption{按帧每帧 throughput 趋势（单位：分组/帧）。
+DASD-PPO 在 Node Rejoin 恢复段的 throughput 取得 2.6072，
+高于 HC-PPO（2.4310）与 PPO-Base（2.5613）。}
+\label{fig:dyn-throughput-trend}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{../results/dynamic_paper_extra_with_nomask_20260524/dyn_phase_bars.pdf}
+\caption{四个动态扰动场景下九种算法在 Pre/Perturb/Recovery 三阶段
+平均 PDR 的分组条形对照。
+Node Dropout 场景无 Recovery 阶段，已在图内标注。}
+\label{fig:dyn-phase-bars}
+\end{figure}
+
+\begin{table}[!htbp]
+\centering
+\caption{动态扰动主表：四场景 \(\times\) 八方法 \(\times\) 三阶段平均 PDR 与 throughput，
+3 seeds 平均。Node Dropout 场景的 Recovery 列按设计为空。}
+\label{tab:dyn-phase}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}llrrrrrr@{}}
+\toprule
+\textbf{场景} & \textbf{方法} &
+  \textbf{PDR pre}\(\uparrow\) & \textbf{PDR perturb}\(\uparrow\) & \textbf{PDR rec.}\(\uparrow\) &
+  \textbf{TP pre}\(\uparrow\) & \textbf{TP perturb}\(\uparrow\) & \textbf{TP rec.}\(\uparrow\) \\
+\midrule
+\multirow{9}{*}{Edge Toggle}
+  & DASD-PPO            & 0.1444 & 0.1220 & 0.1312 & 2.7946 & 2.3609 & 2.5386 \\
+  & DASD-PPO w/o Mask   & 0.1364 & \textbf{0.1415} & 0.1337 & 2.6357 & \textbf{2.7355} & 2.5794 \\
+  & HC-PPO              & 0.1590 & 0.1384 & 0.1390 & 3.0758 & 2.6804 & 2.6841 \\
+  & PPO-Base            & 0.1446 & 0.1403 & 0.1346 & 2.7957 & 2.7104 & 2.5953 \\
+  & Z-MAC*              & 0.0407 & 0.0326 & 0.0268 & 0.7872 & 0.6298 & 0.5202 \\
+  & TRAMA*              & 0.0195 & 0.0204 & 0.0224 & 0.3744 & 0.3960 & 0.4313 \\
+  & Bandit-Index*       & 0.0205 & 0.0169 & 0.0174 & 0.3961 & 0.3273 & 0.3369 \\
+  & Greedy-STDMA-2hop   & 0.1092 & 0.0704 & 0.0692 & 2.1082 & 1.3603 & 1.3395 \\
+  & Heuristic           & 0.0844 & 0.0691 & 0.0695 & 1.6374 & 1.3403 & 1.3435 \\
+\midrule
+\multirow{9}{*}{Bridge Break}
+  & DASD-PPO            & 0.1409 & 0.1357 & 0.1329 & 2.7206 & 2.6236 & 2.5685 \\
+  & DASD-PPO w/o Mask   & 0.1479 & 0.1352 & 0.1447 & 2.8608 & 2.6144 & \textbf{2.8005} \\
+  & HC-PPO              & 0.1474 & 0.1334 & 0.1353 & 2.8491 & 2.5781 & 2.6143 \\
+  & PPO-Base            & 0.1563 & 0.1417 & 0.1345 & 3.0206 & 2.7345 & 2.5974 \\
+  & Z-MAC*              & 0.0407 & 0.0326 & 0.0268 & 0.7872 & 0.6298 & 0.5202 \\
+  & TRAMA*              & 0.0195 & 0.0217 & 0.0183 & 0.3744 & 0.4205 & 0.3539 \\
+  & Bandit-Index*       & 0.0205 & 0.0169 & 0.0175 & 0.3961 & 0.3272 & 0.3378 \\
+  & Greedy-STDMA-2hop   & 0.1092 & 0.0704 & 0.0692 & 2.1082 & 1.3602 & 1.3395 \\
+  & Heuristic           & 0.0844 & 0.0691 & 0.0695 & 1.6374 & 1.3403 & 1.3435 \\
+\midrule
+\multirow{9}{*}{Node Rejoin}
+  & DASD-PPO            & 0.1461 & 0.0134 & 0.1348 & 2.8256 & 0.1899 & \textbf{2.6072} \\
+  & DASD-PPO w/o Mask   & 0.1443 & 0.0135 & 0.1315 & 2.7885 & 0.1916 & 2.5415 \\
+  & HC-PPO              & 0.1473 & 0.0153 & 0.1255 & 2.8439 & 0.2188 & 2.4310 \\
+  & PPO-Base            & 0.1447 & 0.0121 & 0.1321 & 2.7973 & 0.1711 & 2.5613 \\
+  & Z-MAC*              & 0.0407 & 0.0055 & 0.0317 & 0.7872 & 0.0790 & 0.6125 \\
+  & TRAMA*              & 0.0195 & 0.0031 & 0.0200 & 0.3744 & 0.0431 & 0.3864 \\
+  & Bandit-Index*       & 0.0205 & 0.0025 & 0.0179 & 0.3961 & 0.0343 & 0.3451 \\
+  & Greedy-STDMA-2hop   & 0.1092 & 0.0142 & 0.0666 & 2.1082 & 0.2040 & 1.2851 \\
+  & Heuristic           & 0.0844 & 0.0136 & 0.0695 & 1.6374 & 0.1929 & 1.3415 \\
+\midrule
+\multirow{9}{*}{Node Dropout}
+  & DASD-PPO            & 0.1454 & 0.0108 & ---    & 2.8093 & 0.1530 & --- \\
+  & DASD-PPO w/o Mask   & 0.1491 & 0.0115 & ---    & 2.8876 & 0.1629 & --- \\
+  & HC-PPO              & 0.1530 & 0.0112 & ---    & 2.9558 & 0.1595 & --- \\
+  & PPO-Base            & 0.1482 & 0.0173 & ---    & 2.8664 & 0.2476 & --- \\
+  & Z-MAC*              & 0.0407 & 0.0055 & ---    & 0.7872 & 0.0790 & --- \\
+  & TRAMA*              & 0.0195 & 0.0031 & ---    & 0.3744 & 0.0431 & --- \\
+  & Bandit-Index*       & 0.0205 & 0.0025 & ---    & 0.3961 & 0.0343 & --- \\
+  & Greedy-STDMA-2hop   & 0.1092 & 0.0142 & ---    & 2.1082 & 0.2040 & --- \\
+  & Heuristic           & 0.0844 & 0.0136 & ---    & 1.6374 & 0.1929 & --- \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+四个场景的结果不应被概括为"DASD-PPO 全场景领先"。
+相反，三种学习型算法在不同扰动模式下各有所长，
+共同呈现出"\emph{学习型方法整体显著鲁棒、内部存在场景化分工}"的结构。
+
+在 \textbf{Edge Toggle} 场景中，PDR 衰减最小的是 PPO-Base
+（pre \(\rightarrow\) perturb 仅 \(-2.99\%\)），
+其次是 HC-PPO（\(-13.0\%\)），
+而 DASD-PPO 反而衰减最大（\(-15.5\%\)，pre \(0.1444\rightarrow\) perturb \(0.1220\)）。
+进一步诊断表明 DASD-PPO 在 pre 阶段的 sent/candidate 比例（\(\approx 0.586\)）
+显著高于 PPO-Base（\(\approx 0.500\)），属于"过申请"现象——
+两跳掩膜对该场景中频繁开断的边给出了过于乐观的安全集合，
+而服务债务推力放大了这种倾向。
+\textbf{DASD-PPO w/o Mask 提供了关键反证}：
+关掉掩膜后，pre \(\rightarrow\) perturb 不仅没有衰减，反而 PDR 由 \(0.1364\) 升至 \(\mathbf{0.1415}\)（\(+3.7\%\)），
+throughput 由 \(2.636\) 升至 \(\mathbf{2.736}\)（\(+3.8\%\)），
+彻底消除了 DASD-PPO 的退化。
+这一对照直接证明：\emph{DASD-PPO 在 Edge Toggle 中的衰减完全由两跳掩膜的"快照过期"引起}——
+掩膜以 \(t{-}1\) 帧占用为依据屏蔽时隙，而频繁开断的边让该快照在 \(t\) 帧立即失效，
+反而把好时隙也屏蔽掉了。
+
+在 \textbf{Bridge Break} 场景中，DASD-PPO 的 PDR 衰减最小（\(-3.72\%\)），
+但 pre 阶段 PDR 的绝对值（\(0.1409\)）也最低；
+PPO-Base 的 pre 最高（\(0.1563\)）但衰减更大（\(-9.3\%\)）；
+\textbf{DASD-PPO w/o Mask 在恢复段取得全表最高 throughput \(\mathbf{2.8005}\)}
+（vs DASD-PPO \(2.5685\)，相对提升 \(+9.0\%\); vs HC-PPO \(2.6143\)，提升 \(+7.1\%\)），
+说明掩膜的"快照锁定"效应在结构性扰动恢复期同样起反作用——
+关掉掩膜后，服务债务能更快地将新拓扑下的安全候选分配给受影响节点。
+这一对照进一步弱化了掩膜的必要性：
+DASD-PPO 借助服务债务对受影响节点的补偿可以减小退化幅度，
+但其代价是 pre 阶段以略低的吞吐换取保守，
+且 Recovery 段 throughput 反而被 DASD-PPO w/o Mask 显著超越。
+
+在 \textbf{Node Rejoin} 场景中，四种学习型算法在 perturb 段
+PDR 同时跌至 \(0.012\sim 0.015\) 区间——
+即新加入节点尚未被任何调度策略所"识别"，
+分组几乎全部丢失。
+这是当前学习型 MAC 方案的共同局限：
+现有策略并未在训练分布中覆盖"新节点上线"的事件，
+故无法做出零样本响应。
+Recovery 段 DASD-PPO 的 throughput（\(2.6072\)）显著高于
+HC-PPO（\(2.4310\)）与 PPO-Base（\(2.5613\)），
+DASD-PPO w/o Mask 的 throughput（\(2.5415\)）位居其后，
+说明在拓扑稳定后，服务债务是恢复长尾的核心机制，
+而两跳掩膜在该场景中提供小幅但可观察的额外贡献（\(+2.5\%\) recovery TP）。
+这是本节中两跳掩膜\emph{唯一明确表现为净正向贡献}的扰动场景。
+
+在 \textbf{Node Dropout} 场景中，HC-PPO 的 pre PDR 最高（\(0.1530\)），
+\textbf{DASD-PPO w/o Mask 紧随其后取得 \(0.1491\)}（高于 DASD-PPO 的 \(0.1454\) 与 PPO-Base 的 \(0.1482\)）；
+所有算法在 perturb 段 PDR 均跌至 \(0.011\sim 0.017\)
+（永久脱离节点的分组难以投递）；
+由于该场景在仿真器实现中按设计跳过恢复阶段，
+所有算法的 Recovery 列在统计上空缺，
+不应作为评估依据。
+
+值得单独剖析的是\textbf{Greedy-STDMA-2hop}——它在两个静态主场景里都是传统启发式中的
+最强基线（行人 Goodput/slot \(0.1608\)、UAV 稀疏 \(0.2661\)，均居同组之首），
+然而在四个动态扰动场景下都呈现典型的"\emph{染色快照过期}"型衰减：
+Edge Toggle 与 Bridge Break 中其 PDR 从 pre 阶段的 \(0.1092\) 跌至 perturb 段的 \(0.0704\)
+（衰减 \(-35.5\%\)），原因在于两跳贪心染色得到的复用方案本质上是
+\emph{当前帧拓扑的一份快照}——一旦边集合切换或关键链路断开，
+原方案立即对部分时隙产生新的冲突关系，
+而 Greedy-STDMA-2hop 不具备在线再学习能力、
+需要等到下一次重新染色才能恢复，期间产生大量碰撞与丢包。
+该现象在 \textbf{Node Rejoin} 中更为剧烈：
+perturb 段 PDR 跌至 \(0.0142\)，因为新加入节点完全不在原冲突图中、
+染色方案对其"不可见"；
+Recovery 段仅回到 \(0.0666\)（约为 pre 的 \(61\%\)），
+亦说明重新染色后的方案与扰动前相比仍处于次优。
+同源对比下，DASD-PPO 在 Node Rejoin 恢复段的 throughput 取得全表最高的 \(2.6072\)，
+正是\emph{RL 在线更新机制}相对\emph{离线染色快照}在动态拓扑下结构性优势的直接证据。
+
+paper-inspired 三个基线在所有四个场景的 PDR 全程不超过 \(0.04\)、
+throughput 全程不超过 \(0.8\)，
+显著低于\emph{任何}学习型方法，
+也低于 Greedy-STDMA-2hop 与 Heuristic 两种传统强基线。
+这一全方位差距是支撑"在线学习对动态扰动具有结构性鲁棒优势"
+最直接的实验证据。
+配合 \Cref{fig:dyn-jain-trend} 中 Jain 公平性的恢复速度，
+学习型方法即便在 Node Rejoin/Dropout 这种结构性扰动下也仍能
+更快重建公平的发送分布。
+
+\subsection{算法演进消融}
+\label{subsec:ablation}
+
+为定位 DASD-PPO 中各机制的边际贡献，
+本节将四个学习型变体——
+\textbf{PPO-Base \(\rightarrow\) HC-PPO \(\rightarrow\) DASD-PPO w/o Mask \(\rightarrow\) DASD-PPO}——
+按机制叠加顺序构造四级消融对照
+（机制差异见 \Cref{tab:algo-naming} 与 \Cref{fig:algo-evolution}）。
+该链条把"两跳掩膜"从原本被打包在 DASD 模块内的隐式贡献剥离出来，
+让前三个机制（HC 锚定、服务债务 + 密度自适应 + 请求预算）和掩膜
+能被独立测量。
+
+\paragraph{HC 模块（启发式偏离锚定）的贡献。}
+PPO-Base \(\rightarrow\) HC-PPO 的差异是 \eqref{eq:heur-deviation} 的软惩罚项。
+在行人场景中，HC-PPO 相对 PPO-Base 在 Goodput/slot（\(0.2710\rightarrow 0.2770\)，
+\(+2.2\%\)）、PDR（\(0.1329\rightarrow 0.1356\)）、
+Queue slope（\(17.11\rightarrow 16.67\)）与 \(W_t\) P95（\(16062\rightarrow 15825\)）四项均小幅改进，
+且 Jain 尾 100 从 \(0.28\) 升至 \(0.49\)。
+在 UAV 稀疏场景中差距更小（Goodput/slot \(0.2423 \rightarrow 0.2430\)），
+说明 HC 模块的主要收益体现在密度较高、启发式可行域较窄的拓扑。
+
+\paragraph{服务债务 + 密度自适应 + 请求预算（无掩膜版）的贡献。}
+HC-PPO \(\rightarrow\) DASD-PPO w/o Mask 的差异是 \Cref{subsec:debt}--\Cref{subsec:density}
+三节的机制叠加，但 \emph{不含} \Cref{subsec:mask} 的两跳掩膜。
+\emph{静态收益}：行人场景 Starvation 由 \(0.6944\) 降至 \(\mathbf{0.5000}\)（\(-28\%\)），
+\(W_t\) P95 由 \(15825\) 降至 \(\mathbf{15113}\)（全表最低）；
+UAV 稀疏场景 Goodput/slot 由 \(0.2430\) 升至 \(0.2598\)（\(+6.9\%\)），
+Queue slope 由 \(9.99\) 降至 \(\mathbf{9.60}\)（全表最低），
+Starvation 由 \(0.5556\) 降至 \(0.2778\)（\(-50\%\)），
+有效服务率由 \(0.1079\) 升至 \(0.1876\)（\(+74\%\)）。
+\emph{动态收益}：Edge Toggle PDR 由 HC-PPO 的 \(-13.0\%\) 衰减改善为 \(+3.7\%\)\emph{反向增益}；
+Bridge Break Recovery throughput 由 \(2.6143\) 升至 \(\mathbf{2.8005}\)（\(+7.1\%\)，全表最高）。
+该子集已贡献了 DASD-PPO 大部分的公平性与扰动鲁棒性收益。
+
+\paragraph{两跳掩膜（mask）的单独贡献：净增益微弱甚至为负。}
+DASD-PPO w/o Mask \(\rightarrow\) DASD-PPO 的差异\emph{仅是} \Cref{subsec:mask} 的两跳掩膜
+与配套的 \(\alpha=0.75\) 安全槽偏置。
+该步带来：
+\emph{正向}——UAV 稀疏场景 Starvation 由 \(0.2778\) 微降至 \(0.2500\)；
+Node Rejoin Recovery throughput 由 \(2.5415\) 升至 \(2.6072\)（\(+2.5\%\)）；
+有效服务率 UAV 稀疏由 \(0.1876\) 升至 \(0.2012\)（\(+7.2\%\)）。
+\emph{负向}——行人场景 Queue slope 由 \(16.84\) 升至 \(18.53\)（\(+10\%\)），
+\(W_t\) P95 由 \(15113\) 升至 \(16039\)（\(+6\%\)），
+Starvation 由 \(0.5000\) 升至 \(0.6944\)（\(+39\%\)）；
+UAV 稀疏 Queue slope 由 \(9.60\) 升至 \(12.00\)（\(+25\%\)），
+\(W_t\) P95 由 \(13528\) 升至 \(14886\)（\(+10\%\)）；
+\textbf{Edge Toggle PDR perturb 由 \(+3.7\%\) 反向增益重新跌至 \(-15.5\%\) 衰减}；
+Bridge Break Recovery throughput 由 \(\mathbf{2.8005}\) 降至 \(2.5685\)（\(-8.3\%\)）。
+
+将所有 \(11\) 种方法 \(\times\,6\) 种场景 \(\times\) 多指标的比较聚合后：
+\textbf{两跳掩膜的净贡献仅在 UAV 稀疏与 Node Rejoin 中明确为正，
+在行人静态与 Edge Toggle/Bridge Break 中明确为负}。
+这与最初将掩膜作为"DASD-PPO 性能核心"的设计直觉相悖：
+掩膜的真正定位更接近"防 RL 策略采样到非法动作的硬约束"，
+其性能贡献已被服务债务+密度自适应+请求预算这三件套覆盖。
+\Cref{sec:discussion} 将基于该消融结果进一步重新定位掩膜的角色。

@@ -1,0 +1,321 @@
+\section{方法：DASD-PPO 调度算法}
+\label{sec:method}
+
+\subsection{总览与算法演进}
+\label{subsec:overview}
+
+DASD-PPO 是一个以 PPO 为骨干、
+叠加四项拓扑感知归纳偏置的在线 TDMA 调度算法。
+其设计动机源于一对观察：
+\emph{一方面}，传统 MAC 调度文献长期积累的两跳安全约束、所有者优先与
+失败时隙退避等规则~\cite{stdma,zmac,trama}
+是经过数十年验证的高质量安全调度先验，
+直接抛弃这些先验、要求 RL 从零样本中重新学到一致的安全行为，
+既样本效率低、又在训练初期容易破坏可行域；
+\emph{另一方面}，固定权值的启发式调度无法对长尾节点的长时间未服务做出显式补偿，
+也无法跨拓扑密度自适应调整空间复用的激进程度。
+因此，DASD-PPO 将 RL 策略\emph{约束在传统启发式可行域之内}，
+并\emph{显式}为长尾节点提供补偿信号，
+同时按网络密度动态调整安全约束的强度。
+
+为便于讨论上述四项机制的边际贡献，
+本文在内部构造了从弱到强的四层算法演进
+（见 \Cref{fig:algo-evolution} 与 \Cref{tab:algo-naming}）：
+\textbf{PPO-Base} 仅保留逐时隙 Bernoulli 采样的基础策略空间；
+\textbf{HC-PPO} 在 PPO-Base 之上加入启发式偏离软惩罚，
+将策略锚定在启发式邻域；
+\textbf{DASD-PPO w/o Mask} 在 HC-PPO 之上进一步引入服务债务、请求预算与密度自适应控制三项机制，
+但\emph{不}启用两跳安全掩膜——它是为隔离掩膜边际贡献而引入的消融对照变体；
+\textbf{DASD-PPO} 在 DASD-PPO w/o Mask 之上再启用两跳安全掩膜与配套的 \(\alpha=0.75\) 安全槽偏置，
+是本章设计意图最完整的主方法。
+四者共享相同的状态/动作空间与 PPO 训练超参数，
+在 \Cref{sec:exp} 中构成四级模块化消融。
+
+\begin{table}[H]
+\centering
+\caption{本文学习型算法命名与实验代号对照}
+\label{tab:algo-naming}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{论文名}（缩写） & \textbf{中文全称} & \textbf{实验代号 / CSV 列名} \\
+\midrule
+PPO-Base          & 基础 PPO 调度器                        & \texttt{ppo\_baseline} \\
+HC-PPO            & 启发式约束 PPO                         & \texttt{B} \\
+DASD-PPO w/o Mask & 密度感知服务债务 PPO（无掩膜消融变体） & \texttt{B\_debt\_adaptive} \\
+DASD-PPO          & 密度感知服务债务 PPO                   & \texttt{B\_masked\_debt\_adaptive} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=8mm and 10mm,
+    box/.style={
+        draw, rounded corners=2.4pt, align=center,
+        inner sep=3.5pt, minimum width=30mm, minimum height=12mm,
+        font=\small
+    },
+    main/.style={box, fill=red!8, very thick},
+    sub/.style={box, fill=blue!4},
+    abl/.style={box, fill=orange!12, dashed},
+    arr/.style={-{Latex[length=2.2mm]}, thick},
+    note/.style={font=\scriptsize, align=center}
+]
+\node[sub] (m0) {PPO-Base \\ \scriptsize 逐时隙 Bernoulli 采样};
+\node[sub, right=of m0] (m1) {HC-PPO \\ \scriptsize + 启发式偏离惩罚};
+\node[abl, right=of m1] (m2) {DASD-PPO w/o Mask \\ \scriptsize + 服务债务 + 请求预算 \\ \scriptsize + 密度自适应};
+\node[main, right=of m2] (m3) {DASD-PPO \\ \scriptsize + 两跳安全掩膜};
+
+\draw[arr] (m0) -- node[above, note] {KL 形锚定} (m1);
+\draw[arr] (m1) -- node[above, note] {公平性 + 自适应} (m2);
+\draw[arr] (m2) -- node[above, note] {拓扑感知掩膜} (m3);
+\end{tikzpicture}
+\caption{算法演进示意图：
+PPO-Base \(\rightarrow\) HC-PPO \(\rightarrow\) DASD-PPO w/o Mask \(\rightarrow\) DASD-PPO。
+箭头标注每一阶段相对前代引入的关键机制。}
+\label{fig:algo-evolution}
+\end{figure}
+
+后续 \Cref{subsec:srl} 至 \Cref{subsec:training} 按上述顺序依次给出 DASD-PPO 的各个组成部分，
+最后在 \Cref{alg:dasd-ppo} 中给出整体的一帧训练流程。
+
+\subsection{状态、动作与奖励}
+\label{subsec:srl}
+
+\paragraph{状态空间。}
+每节点每帧观测的状态向量维度为 \(5M+10+N\)（默认 \(M=10,N=12\) 时共 \(72\) 维），
+由四类特征拼接而成：
+\begin{itemize}
+    \item \textbf{时隙感知（\(3M\) 维）}：
+          Bown（自身上一帧占用状态，\(M\) 维）；
+          T2hop（两跳占用标识 \(+\) 最小跳数归一化，\(2M\) 维）。
+    \item \textbf{队列与流量（10 维标量）}：
+          队列长度 \(Q_{i,t}\)、到达率 EWMA、服务债务计数、邻居利用率等。
+    \item \textbf{公平性与节点 ID（\(N\) 维）}：节点 ID 的 one-hot 编码。
+    \item \textbf{策略上下文（\(2M\) 维）}：
+          上一帧申请概率向量 \(P_{t-1}\)（\(M\) 维）、
+          本帧仿真器侧启发式基准概率 \(p_{\mathrm{heur},t}\)（\(M\) 维）。
+\end{itemize}
+\(p_{\mathrm{heur},t}\) 作为乘数模式下的基准参考，让 RL 能够精确学习相对启发式的偏移。
+
+\paragraph{动作空间。}
+Actor 输出乘数因子 \(\alpha_t\in(0,1)^M\)，
+申请概率按乘数模式合成：
+\begin{equation}
+p_{\mathrm{req},t} \;=\; \mathrm{clamp}\!\left( p_{\mathrm{heur},t}\cdot 2\alpha_t,\;0,\;1\right).
+\label{eq:multiplier}
+\end{equation}
+\(\alpha_t\approx 0.5\) 时等效纯启发式；
+Actor 输出层零初始化保证 Sigmoid 输出在训练起点为 \(0.5\)，
+即学习从启发式策略平稳启动，
+避免训练初期对稳定时隙做出激进偏离。
+最终送入仿真的为对 \(p_{\mathrm{req},t}\) 做独立 Bernoulli 采样得到的二值动作 \(a_t\in\{0,1\}^M\)。
+
+\paragraph{奖励信号。}
+为支撑多维动作的精确信用分配，
+仿真器在每帧逐时隙向训练器上报每个时隙的发送结果
+（未申请 / 发送成功 / 发生碰撞，三选一），
+训练器据此计算逐时隙奖励：
+\begin{equation}
+r_{m,t} = \begin{cases}
+        +1, & y_{m,t}=1\;\text{（发送成功）}, \\
+        -1, & y_{m,t}=2\;\text{（发生碰撞）}, \\
+        \phantom{+}0, & y_{m,t}=0\;\text{（未申请）}.
+\end{cases}
+\label{eq:slot-reward}
+\end{equation}
+此外，为对齐 \(t\) 时刻动作的实际反馈，
+本文引入一个\emph{时序对齐缓冲}：
+帧 \(t\) 上报的 \(r_{m,t}\) 与帧 \(t-1\) 的动作 \(a_{m,t-1}\) 配对后再写入回放缓冲，
+修复因果时序错位。
+最后对每节点维护 EWMA 奖励基线（衰减 \(0.95\)），
+存入 buffer 的奖励为差分奖励 \(r^{\mathrm{shaped}}_{m,t}=r_{m,t}-\bar r_{m,t}\)，
+减小方差、突出改进信号。
+
+\subsection{LSTM Actor--Critic 网络}
+\label{subsec:net}
+
+DASD-PPO 采用轻量级 LSTM Actor--Critic 架构，
+每节点独立维护一组参数与优化器（非参数共享）；
+单节点网络总参数量约 \(13.8\)K。
+之所以选用如此轻量的网络规模，
+是因为本文每帧只能采集到 \(N\) 个节点 \(\times M\) 个时隙的局部观测样本，
+样本规模有限；
+若网络过参数化，PPO 在小批量更新下梯度信号易被噪声淹没、
+策略熵塌缩，
+难以稳定收敛。
+前向过程为：
+\begin{equation}
+    \begin{aligned}
+        h_t      &= \mathrm{LSTM}(x_t,\;h_{t-1};\;\theta_{\mathrm{enc}}),\quad h_t\in\R^{32},\\
+        \alpha_t &= \sigma(W_a h_t + b_a),\quad \alpha_t\in(0,1)^M,\\
+        V_t      &= W_c h_t + b_c,\quad V_t\in\R^M,
+    \end{aligned}
+    \label{eq:network}
+\end{equation}
+其中 \(\sigma(\cdot)\) 为 Sigmoid 函数。
+\(W_a,b_a\) 零初始化保证学习起点等效纯启发式（\(\alpha_t\equiv 0.5\)）；
+Critic 头输出 \(M\) 个逐时隙价值估计 \(V_{m,t}\)，
+为后述逐时隙信用分配提供基线函数。
+
+\subsection{逐时隙信用分配}
+\label{subsec:credit}
+
+传统聚合奖励 \(r=\sum_m r_{m,t}\) 与单标量价值估计配合时，
+\(M\) 个独立 Bernoulli 动作只能共享同一个 advantage 信号，
+PPO 无法区分哪个时隙决策好/坏。
+DASD-PPO 改为对每个时隙独立计算优势：
+\begin{equation}
+\hat A_{m,t} = \sum_{l=0}^{L-1}(\gamma\lambda)^{l}\,\delta_{m,t+l},
+\qquad
+\delta_{m,t} = r^{\mathrm{shaped}}_{m,t} + \gamma V_{m,t+1} - V_{m,t},
+\label{eq:gae-slot}
+\end{equation}
+PPO 策略损失改为逐时隙形式：
+\begin{equation}
+\mathcal{L}_{\mathrm{policy}}(\theta) =
+- \frac{1}{M}\sum_{m=1}^{M}
+\min\!\left(
+\rho_{m,t}(\theta)\,\hat A_{m,t},\;
+\mathrm{clip}(\rho_{m,t}(\theta),1-\epsilon,1+\epsilon)\,\hat A_{m,t}
+\right),
+\label{eq:ppo-slot}
+\end{equation}
+其中比率 \(\rho_{m,t}(\theta)=\pi_\theta(a_{m,t}\mid s_t)/\pi_{\theta_{\mathrm{old}}}(a_{m,t}\mid s_t)\)。
+实验显示，该改造使策略 entropy 收敛速度提升约 \(105\times\)，
+L\_actor 从死寂（\(\approx 0\)）变为活跃（\(+0.0076\)），
+证实逐时隙信用分配有效解决了多动作维度的归因问题（详见 \Cref{subsec:limitations}）。
+
+\subsection{启发式偏离锚定（HC-PPO 模块）}
+\label{subsec:hc}
+
+PPO-Base 的纯学习策略容易在训练初期对稳定时隙做出激进偏离，
+破坏仿真器侧已有启发式的安全调度先验。
+HC-PPO 模块在 PPO 损失中加入与启发式概率向量的二阶距离软惩罚：
+\begin{equation}
+\mathcal{L}_{\mathrm{heur}}(\theta) \;=\; \lambda_{\mathrm{heur}}\cdot
+   \mathbb{E}_{t}\!\left[\,\norm{p_{\mathrm{req},t}-p_{\mathrm{heur},t}}_2^{2}\,\right],
+\qquad \lambda_{\mathrm{heur}}\in[0.01,0.02].
+\label{eq:heur-deviation}
+\end{equation}
+\eqref{eq:heur-deviation} 等价于在策略空间施加以启发式为先验的 KL 形锚定，
+使学习型策略在保持探索能力的同时不脱离安全调度的可行域；
+HC-PPO 因此作为 DASD-PPO 的内层基底，
+后续两跳掩膜、服务债务等机制均叠加在 HC-PPO 之上。
+
+\subsection{两跳安全掩膜}
+\label{subsec:mask}
+
+仅靠软惩罚不足以避免学习型策略采样到与近邻冲突的时隙。
+DASD-PPO 在采样阶段引入一个\emph{硬约束算子}，
+\emph{显式屏蔽}上一帧一跳/二跳邻居已占用的时隙：
+\begin{equation}
+\tilde p_{\mathrm{req},m,t} \;=\;
+\begin{cases}
+p_{\mathrm{req},m,t}, & \text{若 } m\in\mathcal{S}_{\mathrm{safe},t-1},\\
+0,                    & \text{否则},
+\end{cases}
+\label{eq:mask}
+\end{equation}
+同时安全时隙的 Actor 输出初始化为 \(\alpha_m=0.75\)
+（等效初始申请概率为 \(1.5\,p_{\mathrm{heur},m}\)），
+鼓励学习期对安全候选时隙做更积极的尝试。
+两跳掩膜将策略可行域显式收缩到与近邻无冲突的子空间，
+保留了 \Cref{sec:related} 中传统两跳仲裁方法的核心拓扑感知机制，
+但其激活与否由后述密度自适应控制按当前 \(\rho_t\) 决定。
+
+\subsection{服务债务与请求预算}
+\label{subsec:debt}
+
+两跳掩膜虽能避免冲突，
+却无法补偿"明明有队列但长期未发送"的长尾节点。
+为此 DASD-PPO 引入\emph{服务债务}指示量：
+\begin{equation}
+D_{i,t} \;=\; \mathbf{1}\!\left[\,f_{i,t}>\tau_D\;\land\;Q_{i,t}>0\,\right],
+\qquad \tau_D=5,
+\label{eq:debt-indicator}
+\end{equation}
+其中 \(f_{i,t}\) 为节点 \(i\) 自上次成功发送以来的连续未发送帧数。
+当 \(D_{i,t}=1\) 时，在安全时隙上施加确定性动作推力：
+\begin{equation}
+\tilde\alpha_{i,m} \;=\; \mathrm{clamp}\!\left(\alpha_{i,m}+\beta_D,\;0,\;1\right),
+\qquad \beta_D=0.15,
+\label{eq:debt-boost}
+\end{equation}
+并在成功发送时给予奖励加成 \(r_{\mathrm{debt}}=\gamma_D\cdot\mathbf{1}[\text{成功}]\)（\(\gamma_D=0.75\)）。
+
+为防止债务驱动的动作推力造成新的过申请，
+设节点 \(i\) 在帧 \(t\) 的有效安全时隙数为 \(\abs{\mathcal{S}_{\mathrm{safe},i,t}}\)，
+引入\emph{请求预算}约束：
+\begin{equation}
+\sum_{m\in\mathcal{S}_{\mathrm{safe},i,t}}\tilde\alpha_{i,m}
+\;\le\; B_{\mathrm{req}}\cdot\kappa_B,
+\qquad B_{\mathrm{req}}=5.0,\;\kappa_B\in[0.9,1.1].
+\label{eq:budget}
+\end{equation}
+\(\kappa_B\) 由近期申请成功率与队列增长动态缩放；
+超过上限时按比例下调全部 \(\tilde\alpha_{i,m}\)，
+保证债务推力不会无限放大。
+
+\subsection{密度感知自适应控制}
+\label{subsec:density}
+
+两跳掩膜在不同密度下的代价并不对称：
+稀疏拓扑下安全集合较大，掩膜能精确收缩可行域而不损失候选；
+密集拓扑下安全集合萎缩，过严的掩膜会令策略无候选可选。
+为此 DASD-PPO 引入由网络密度驱动的自适应控制机制。
+设网络在帧 \(t\) 的活跃节点数为 \(n_{\mathrm{act}}\)、活跃边数为 \(e_{\mathrm{act}}\)，
+归一化密度为
+\begin{equation}
+\rho_t \;=\; \frac{e_{\mathrm{act}}}{n_{\mathrm{act}}(n_{\mathrm{act}}-1)/2}.
+\label{eq:density}
+\end{equation}
+当 \(\rho_t<\rho_{\mathrm{sparse}}=0.30\) 时\emph{启用}两跳掩膜，
+并保持 \(\alpha\) 向 \(0.75\) 偏置；
+当 \(\rho_t>\rho_{\mathrm{dense}}=0.45\) 时\emph{关闭}掩膜，
+并令 \(\alpha\) 平滑回退至 \(0.5\)；
+中间区间按 \(\rho_t\) 线性插值。
+注意：服务债务侧的动作推力与还债奖励\emph{不}受密度因子衰减，
+以保证长尾节点在任意密度下都能得到补偿。
+
+\subsection{在线 PPO 训练流程}
+\label{subsec:training}
+
+仿真器与训练器之间通过两条命名管道完成异步双向通信：
+\emph{状态管道}由仿真器写入、训练器读取，每帧每节点一条 JSON 记录；
+\emph{动作管道}由训练器写入、仿真器读取，每帧一条 JSON 记录。
+两条管道均采用非阻塞模式：
+若训练器未运行，仿真器自动回退到启发式策略并周期性重试连接；
+反之，训练器可独立完成 RL 更新。
+完整一帧训练流程如 \Cref{alg:dasd-ppo} 所示。
+
+\begin{algorithm}[!htbp]
+\caption{DASD-PPO 一帧训练流程}
+\label{alg:dasd-ppo}
+\begin{algorithmic}[1]
+\Require 状态 \(s_t\)；启发式概率 \(p_{\mathrm{heur},t}\)；安全时隙集 \(\mathcal{S}_{\mathrm{safe},t}\)；
+         网络密度 \(\rho_t\)；服务债务向量 \(D_t\)；预算 \(B_{\mathrm{req}}\)；更新间隔 \(K=128\)
+\State Actor 前向：\(\alpha_t \gets \mathrm{Actor}_\theta(s_t)\)
+\If{\(\rho_t<\rho_{\mathrm{sparse}}\)} \Comment{稀疏拓扑}
+    \State 启用两跳掩膜，按式~\eqref{eq:mask}\,（两跳安全掩膜）得 \(\tilde p_{\mathrm{req},t}\)
+\ElsIf{\(\rho_t>\rho_{\mathrm{dense}}\)} \Comment{密集拓扑}
+    \State 关闭掩膜，\(\alpha_t \gets 0.5 + 0.5(\alpha_t-0.5)\cdot w_{\mathrm{dense}}\)
+\Else \Comment{过渡区}
+    \State 按 \(\rho_t\) 在掩膜与开放之间线性插值
+\EndIf
+\State 按式~\eqref{eq:debt-boost}\,（服务债务推力）对债务节点的 \(\tilde\alpha_{i,m}\) 加 \(\beta_D\)
+\State 若 \(\sum\tilde\alpha_{i,m}\) 超过式~\eqref{eq:budget}\,（请求预算）规定的上限，则按比例下调
+\State 按式~\eqref{eq:multiplier}\,（乘数模式策略合成）得 \(p_{\mathrm{req},t}\)，
+       对每个时隙做 Bernoulli 采样得动作 \(a_t\)
+\State 将 \(a_t\) 送入仿真器执行，收集逐时隙奖励
+       \(r_t\in\{-1,0,+1\}^M\) 与还债奖励 \(r_{\mathrm{debt}}\)
+\State 将 \((s_{t-1},a_{t-1},r_t+r_{\mathrm{debt}},s_t)\) 经时序对齐后写入回放缓冲
+\If{累计样本达到 \(K\)}
+    \State 按式~\eqref{eq:gae-slot}\,（逐时隙 GAE）计算优势 \(\hat A_{m,t}\)
+    \State 按式~\eqref{eq:ppo-slot}\,（逐时隙 PPO 损失）与式~\eqref{eq:heur-deviation}\,（启发式偏离锚定）
+           做小批量 PPO 更新
+    \State 衰减学习率 \(\eta \gets \eta\cdot\gamma_{\mathrm{decay}}\)
+\EndIf
+\end{algorithmic}
+\end{algorithm}

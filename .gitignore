@@ -30,6 +30,22 @@ logs/
 # 临时文件
 temp_docx_extract/
 tdma_run_*.ini
+texput.log
 
 # RL 模型权重
 checkpoints/
+
+# LaTeX 构建产物
+paper/build/
+paper/*.aux
+paper/*.bcf
+paper/*.bbl
+paper/*.blg
+paper/*.fdb_latexmk
+paper/*.fls
+paper/*.log
+paper/*.out
+paper/*.run.xml
+paper/*.synctex.gz
+paper/*.pdf
+paper/*.bak
